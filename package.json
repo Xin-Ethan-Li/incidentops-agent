@@ -11,7 +11,7 @@
     "start": "node dist/main.js",
     "prestart:dev": "npm run build",
     "start:dev": "concurrently --kill-others \"tsc -p tsconfig.json --watch --preserveWatchOutput\" \"node --watch dist/main.js\"",
-    "test": "npm run test:e2e",
+    "test": "npm run build && node --test test/*.test.js",
     "test:e2e": "npm run build && node --test test/health.e2e.test.js"
   },
   "dependencies": {
