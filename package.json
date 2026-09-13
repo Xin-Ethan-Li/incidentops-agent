@@ -1,0 +1,29 @@
+{
+  "name": "incidentops-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "prestart:dev": "npm run build",
+    "start:dev": "concurrently --kill-others \"tsc -p tsconfig.json --watch --preserveWatchOutput\" \"node --watch dist/main.js\"",
+    "test": "npm run test:e2e",
+    "test:e2e": "npm run build && node --test test/health.e2e.test.js"
+  },
+  "dependencies": {
+    "@nestjs/common": "^12.0.1",
+    "@nestjs/core": "^12.0.1",
+    "@nestjs/platform-fastify": "^12.0.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.2",
+    "concurrently": "^10.0.5",
+    "typescript": "^7.0.2"
+  }
+}
