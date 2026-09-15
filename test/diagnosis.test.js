@@ -56,8 +56,8 @@ test('recommended actions remain returned data and do not execute tools', async 
   const model = { async respond() { return { kind: 'final', diagnosis }; } };
   const executor = { async execute() { calls++; assert.fail('Recommendations must not execute'); } };
   const result = await new AgentOrchestrator(model, executor).investigate(incidents[0]);
-  assert.deepEqual(result, diagnosis);
-  assert.equal(typeof result, 'object');
+  assert.deepEqual(result.diagnosis, diagnosis);
+  assert.equal(typeof result.diagnosis, 'object');
   assert.equal(calls, 0);
 });
 
