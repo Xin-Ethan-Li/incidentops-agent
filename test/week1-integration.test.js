@@ -1,6 +1,7 @@
+import { createTestExecutor } from './fixtures/mcp-memory.js';
 import assert from 'node:assert/strict';
 import test, { beforeEach } from 'node:test';
-import { AgentOrchestrator, ToolExecutor } from '../dist/agent/index.js';
+import { AgentOrchestrator } from '../dist/agent/index.js';
 import { RunbookRetriever } from '../dist/rag/index.js';
 import { incidents, logs, metrics, services, runbooks } from '../dist/fixtures/index.js';
 
@@ -9,7 +10,7 @@ beforeEach(t => {
   t.mock.method(globalThis, 'fetch', () => { assert.fail('Integration tests must not access the network'); });
 });
 
-async function investigate(incident) {
+async function investigate(t, incident) {
   const evidence = {};
   const states = [];
   const embeddingInputs = [];
@@ -24,7 +25,7 @@ async function investigate(incident) {
       return runbooks.map((_, i) => i === index ? 1 : 0);
     });
   } };
-  const executor = new ToolExecutor(new RunbookRetriever(provider));
+  const executor = await createTestExecutor(t, new RunbookRetriever(provider));
   const steps = [
     { name: 'search_logs', arguments: { service: incident.service, timeWindow: incident.timeWindow, levels: null, contains: null } },
     { name: 'get_metrics', arguments: { service: incident.service, timeWindow: incident.timeWindow, metricNames: null } },
@@ -113,8 +114,8 @@ async function investigate(incident) {
   return { record, evidence };
 }
 
-test('INC-001 full Week 1 path returns real evidence, semantic context and a completed record', async () => {
-  const { record, evidence } = await investigate(incidents.find(incident => incident.id === 'INC-001'));
+test('INC-001 full Week 1 path returns real evidence, semantic context and a completed record', async t => {
+  const { record, evidence } = await investigate(t, incidents.find(incident => incident.id === 'INC-001'));
   assert.deepEqual(evidence.search_logs.map(log => log.id), ['LOG-001-01', 'LOG-001-02', 'LOG-001-03']);
   assert.equal(evidence.get_metrics.find(series => series.name === 'redis_connection_timeouts').points[1].value, 45);
   assert.equal(evidence.get_service_info.version, '1.4.2');
@@ -126,11 +127,11 @@ test('INC-001 full Week 1 path returns real evidence, semantic context and a com
 
 const ids = ['INC-001', 'INC-002', 'INC-003', 'INC-004', 'INC-005'];
 for (const id of ids) {
-  test(`${id} repeats the fixture-backed pipeline with stable evidence and result`, async () => {
+  test(`${id} repeats the fixture-backed pipeline with stable evidence and result`, async t => {
     assert.deepEqual(incidents.map(incident => incident.id), ids);
     const incident = incidents.find(incident => incident.id === id);
-    const first = await investigate(incident);
-    const second = await investigate(incident);
+    const first = await investigate(t, incident);
+    const second = await investigate(t, incident);
     assert.notEqual(first.record.investigationId, second.record.investigationId);
     const { investigationId: firstId, ...firstContent } = first.record;
     const { investigationId: secondId, ...secondContent } = second.record;

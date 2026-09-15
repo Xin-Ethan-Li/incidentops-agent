@@ -119,7 +119,7 @@ test('turn limit records only seven actual attempts and never the eighth request
 });
 
 test('unknown tool records rejected executor attempt without arbitrary execution', async () => {
-  const executor = new ToolExecutor({ async search() { assert.fail('No retrieval'); } });
+  const executor = new ToolExecutor({ async callTool() { assert.fail('Unapproved tool must not reach MCP'); } });
   const agent = new AgentOrchestrator({ async respond() { return batch(call('bad', 'delete_database')); } }, executor);
   await assert.rejects(agent.investigate(incident), error => {
     assert.match(error.message, /Tool not allowed/);

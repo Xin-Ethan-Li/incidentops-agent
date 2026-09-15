@@ -1,7 +1,8 @@
+import { createTestExecutor } from './fixtures/mcp-memory.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync, readdirSync } from 'node:fs';
-import { AgentOrchestrator, ToolExecutor } from '../dist/agent/index.js';
+import { AgentOrchestrator } from '../dist/agent/index.js';
 import { RunbookRetriever } from '../dist/rag/index.js';
 import { incidents, runbooks } from '../dist/fixtures/index.js';
 import { ToolError } from '../dist/tools/index.js';
@@ -21,7 +22,7 @@ class ScriptedModel {
     return typeof next === 'function' ? next(request) : next;
   }
 }
-function semanticExecutor() {
+async function semanticExecutor(t) {
   const calls = [];
   const embeddings = {
     async embed(texts) {
@@ -30,11 +31,11 @@ function semanticExecutor() {
         ? (text.includes(runbooks[0].title) ? [1, 0] : [0, 1]) : [1, 0]);
     },
   };
-  return { executor: new ToolExecutor(new RunbookRetriever(embeddings)), calls };
+  return { executor: await createTestExecutor(t, new RunbookRetriever(embeddings)), calls };
 }
 
-test('agent investigates through logs, metrics and semantic context then returns validated diagnosis', async () => {
-  const { executor, calls } = semanticExecutor();
+test('agent investigates through logs, metrics and semantic context then returns validated diagnosis', async t => {
+  const { executor, calls } = await semanticExecutor(t);
   const model = new ScriptedModel([
     requests('turn-1', call('log-id', 'search_logs', { service: incident.service, timeWindow: incident.timeWindow, levels: null, contains: null })),
     input => {
@@ -66,8 +67,8 @@ test('agent investigates through logs, metrics and semantic context then returns
   assert.deepEqual(calls[1], ['a failing dependency interrupts checkout']);
 });
 
-test('executor routes all four allowed tools and normalizes nullable optional fields', async () => {
-  const { executor } = semanticExecutor();
+test('executor routes all four allowed tools and normalizes nullable optional fields', async t => {
+  const { executor } = await semanticExecutor(t);
   const execute = async (name, args) => JSON.parse((await executor.execute(call('id', name, args))).output);
   assert.equal((await execute('get_service_info', { service: 'checkout-api' })).version, '1.4.2');
   assert.equal((await execute('search_logs', { service: 'checkout-api', timeWindow: incident.timeWindow, levels: ['error'], contains: 'REDIS' })).length, 1);
@@ -75,8 +76,8 @@ test('executor routes all four allowed tools and normalizes nullable optional fi
   assert.equal((await execute('search_runbook', { query: 'dependency issue', limit: null })).length, 5);
 });
 
-test('multiple calls execute sequentially and preserve model call IDs in order', async () => {
-  const { executor } = semanticExecutor();
+test('multiple calls execute sequentially and preserve model call IDs in order', async t => {
+  const { executor } = await semanticExecutor(t);
   const order = [];
   const wrapped = { async execute(request) { order.push(request.callId); return executor.execute(request); } };
   const model = new ScriptedModel([
@@ -91,8 +92,8 @@ test('multiple calls execute sequentially and preserve model call IDs in order',
   assert.deepEqual(order, ['second', 'first']);
 });
 
-test('application rejects unknown tool requests without executing arbitrary code', async () => {
-  const { executor, calls } = semanticExecutor();
+test('application rejects unknown tool requests without executing arbitrary code', async t => {
+  const { executor, calls } = await semanticExecutor(t);
   for (const name of ['delete_database', 'constructor', 'toString', '__proto__']) {
     const model = new ScriptedModel([requests('bad', call('id', name, {}))]);
     await assert.rejects(new AgentOrchestrator(model, executor).investigate(incident), /Tool not allowed/);
@@ -117,8 +118,8 @@ test('default ceiling is eight model turns and no tools run after final availabl
   assert.equal(executions, 7);
 });
 
-test('configured ceiling permits final diagnosis on last turn and rejects invalid ceilings', async () => {
-  const { executor } = semanticExecutor();
+test('configured ceiling permits final diagnosis on last turn and rejects invalid ceilings', async t => {
+  const { executor } = await semanticExecutor(t);
   const model = new ScriptedModel([requests('r', call('c', 'get_service_info', { service: 'checkout-api' })), final('done')]);
   assert.deepEqual((await new AgentOrchestrator(model, executor, 2).investigate(incident)).diagnosis, diagnosis('done'));
   for (const value of [0, -1, 1.5, Infinity]) assert.throws(() => new AgentOrchestrator(model, executor, value), TypeError);
@@ -134,14 +135,14 @@ test('malformed model protocol is rejected before tool execution', async () => {
   }
 });
 
-test('call IDs cannot be reused across turns', async () => {
-  const { executor } = semanticExecutor();
+test('call IDs cannot be reused across turns', async t => {
+  const { executor } = await semanticExecutor(t);
   const response = requests('r', call('id', 'get_service_info', { service: 'checkout-api' }));
   await assert.rejects(new AgentOrchestrator(new ScriptedModel([response, response]), executor).investigate(incident), /Reused/);
 });
 
-test('executor validates argument shapes and propagates existing tool validation errors', async () => {
-  const { executor } = semanticExecutor();
+test('executor validates argument shapes and propagates existing tool validation errors', async t => {
+  const { executor } = await semanticExecutor(t);
   for (const args of [null, [], '{}', {}, { service: 'checkout-api', extra: true }]) {
     await assert.rejects(executor.execute(call('id', 'get_service_info', args)), error => error instanceof ToolError && error.code === 'INVALID_INPUT');
   }
@@ -151,11 +152,11 @@ test('executor validates argument shapes and propagates existing tool validation
   await assert.rejects(executor.execute(call('id', 'search_runbook', { query: ' ', limit: null })), TypeError);
 });
 
-test('embedding and model failures propagate without recovery', async () => {
+test('embedding and model failures propagate without recovery', async t => {
   const failure = new Error('provider unavailable');
   const retriever = new RunbookRetriever({ async embed() { throw failure; } });
   const model = new ScriptedModel([requests('r', call('id', 'search_runbook', { query: 'query' }))]);
-  await assert.rejects(new AgentOrchestrator(model, new ToolExecutor(retriever)).investigate(incident), error => error === failure);
+  await assert.rejects(new AgentOrchestrator(model, await createTestExecutor(t, retriever)).investigate(incident), error => error.message === failure.message);
   await assert.rejects(new AgentOrchestrator({ async respond() { throw failure; } }, {}).investigate(incident), error => error === failure);
 });
 
