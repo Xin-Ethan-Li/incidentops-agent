@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { assertDiagnosis, DIAGNOSIS_SCHEMA } from '../domain/diagnosis.js';
 import { assertModelResult, INVESTIGATION_INSTRUCTIONS, type AgentModel, type AgentModelRequest, type AgentModelResult, type AgentToolCall } from './agent-model.js';
 import { TOOL_DEFINITIONS } from './tool-definitions.js';
 
@@ -27,6 +28,7 @@ export class OpenAIAgentModel implements AgentModel {
       instructions: INVESTIGATION_INSTRUCTIONS, // previous_response_id does not carry instructions forward.
       tools: TOOL_DEFINITIONS.map(definition => ({ type: 'function' as const, ...definition, strict: true })),
       parallel_tool_calls: false,
+      text: { format: { type: 'json_schema', name: 'incident_diagnosis', schema: DIAGNOSIS_SCHEMA, strict: true } },
       ...(request.kind === 'initial'
         ? { input: request.prompt }
         : { previous_response_id: request.continuation, input: request.outputs.map(output => ({
@@ -54,9 +56,15 @@ export class OpenAIAgentModel implements AgentModel {
         throw new Error(`Unsupported model output: ${item.type}`);
       }
     }
-    const result: AgentModelResult = calls.length
-      ? { kind: 'tool_calls', continuation: response.id, calls }
-      : { kind: 'final', text: texts.join('\n') };
+    let result: AgentModelResult;
+    if (calls.length) {
+      result = { kind: 'tool_calls', continuation: response.id, calls };
+    } else {
+      let diagnosis: unknown;
+      try { diagnosis = JSON.parse(texts.join('\n')); } catch { throw new Error('Malformed diagnosis JSON'); }
+      assertDiagnosis(diagnosis);
+      result = { kind: 'final', diagnosis };
+    }
     assertModelResult(result);
     return result;
   }

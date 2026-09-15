@@ -9,7 +9,8 @@ import { ToolError } from '../dist/tools/index.js';
 const incident = incidents[0];
 const call = (callId, name, args) => ({ callId, name, arguments: args });
 const requests = (continuation, ...calls) => ({ kind: 'tool_calls', continuation, calls });
-const final = text => ({ kind: 'final', text });
+const diagnosis = summary => ({ summary, probableCause: 'Insufficient evidence to determine a cause.', confidence: 'medium', evidence: [], recommendedActions: [] });
+const final = summary => ({ kind: 'final', diagnosis: diagnosis(summary) });
 class ScriptedModel {
   seen = [];
   constructor(script) { this.script = script; }
@@ -32,7 +33,7 @@ function semanticExecutor() {
   return { executor: new ToolExecutor(new RunbookRetriever(embeddings)), calls };
 }
 
-test('agent investigates through logs, metrics and semantic context then returns model final text', async () => {
+test('agent investigates through logs, metrics and semantic context then returns validated diagnosis', async () => {
   const { executor, calls } = semanticExecutor();
   const model = new ScriptedModel([
     requests('turn-1', call('log-id', 'search_logs', { service: incident.service, timeWindow: incident.timeWindow, levels: null, contains: null })),
@@ -57,7 +58,9 @@ test('agent investigates through logs, metrics and semantic context then returns
       return final('Retrieved guidance: ' + evidence.runbook.title);
     },
   ]);
-  assert.equal(await new AgentOrchestrator(model, executor).investigate(incident), 'Retrieved guidance: ' + runbooks[0].title);
+  const result = await new AgentOrchestrator(model, executor).investigate(incident);
+  assert.deepEqual(result, diagnosis('Retrieved guidance: ' + runbooks[0].title));
+  assert.equal(result.confidence, 'medium'); // Retrieval score 1 does not set confidence to high.
   assert.deepEqual(JSON.parse(model.seen[0].prompt), incident);
   assert.equal(calls[0].length, 5);
   assert.deepEqual(calls[1], ['a failing dependency interrupts checkout']);
@@ -84,7 +87,7 @@ test('multiple calls execute sequentially and preserve model call IDs in order',
       return final('done');
     },
   ]);
-  assert.equal(await new AgentOrchestrator(model, wrapped).investigate(incident), 'done');
+  assert.deepEqual(await new AgentOrchestrator(model, wrapped).investigate(incident), diagnosis('done'));
   assert.deepEqual(order, ['second', 'first']);
 });
 
@@ -101,7 +104,7 @@ test('application rejects unknown tool requests without executing arbitrary code
 test('immediate final response executes no tools', async () => {
   const model = new ScriptedModel([final('Insufficient evidence supplied.')]);
   const executor = { async execute() { assert.fail('Must not execute'); } };
-  assert.equal(await new AgentOrchestrator(model, executor).investigate(incident), 'Insufficient evidence supplied.');
+  assert.deepEqual(await new AgentOrchestrator(model, executor).investigate(incident), diagnosis('Insufficient evidence supplied.'));
 });
 
 test('default ceiling is eight model turns and no tools run after final available turn', async () => {
@@ -114,10 +117,10 @@ test('default ceiling is eight model turns and no tools run after final availabl
   assert.equal(executions, 7);
 });
 
-test('configured ceiling permits final text on last turn and rejects invalid ceilings', async () => {
+test('configured ceiling permits final diagnosis on last turn and rejects invalid ceilings', async () => {
   const { executor } = semanticExecutor();
   const model = new ScriptedModel([requests('r', call('c', 'get_service_info', { service: 'checkout-api' })), final('done')]);
-  assert.equal(await new AgentOrchestrator(model, executor, 2).investigate(incident), 'done');
+  assert.deepEqual(await new AgentOrchestrator(model, executor, 2).investigate(incident), diagnosis('done'));
   for (const value of [0, -1, 1.5, Infinity]) assert.throws(() => new AgentOrchestrator(model, executor, value), TypeError);
 });
 

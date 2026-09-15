@@ -3,6 +3,7 @@ import test from 'node:test';
 import { OpenAIAgentModel, TOOL_DEFINITIONS } from '../dist/agent/index.js';
 import { INVESTIGATION_INSTRUCTIONS } from '../dist/agent/agent-model.js';
 
+const diagnosis = { summary: 'Checkout failures investigated.', probableCause: 'Dependency connectivity needs further investigation.', confidence: 'medium', evidence: [], recommendedActions: [] };
 const fn = (args = '{"service":"checkout-api"}') => ({ type: 'function_call', id: 'fc-item', call_id: 'call-original', name: 'get_service_info', arguments: args, status: 'completed' });
 const message = text => ({ type: 'message', id: 'msg', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text, annotations: [] }] });
 const response = (output, id = 'resp-original') => ({ id, object: 'response', status: 'completed', error: null, output });
@@ -36,6 +37,7 @@ test('Responses first request includes strict tools and instructions and maps ca
   assert.equal(body.input, 'visible incident');
   assert.equal(body.instructions, INVESTIGATION_INSTRUCTIONS);
   assert.equal(body.parallel_tool_calls, false);
+  assertDiagnosisFormat(body);
   assert.ok(!('previous_response_id' in body));
   assert.deepEqual(body.tools.map(tool => tool.name), ['search_logs', 'get_metrics', 'get_service_info', 'search_runbook']);
   function strictObjects(schema) {
@@ -50,17 +52,18 @@ test('Responses first request includes strict tools and instructions and maps ca
   assert.doesNotMatch(JSON.stringify(TOOL_DEFINITIONS), /embedding|vectors|cosine|expectedCause|ground.truth/i);
 });
 
-test('continuation sends previous response ID and original call IDs, repeats instructions, then maps final text', async t => {
-  const fetch = localTransport(t, [response([fn(), { ...fn(), call_id: 'another-call' }]), response([message('Evidence-based conclusion.')], 'resp-next')]);
+test('continuation sends previous response ID and original call IDs, repeats instructions, then maps final diagnosis', async t => {
+  const fetch = localTransport(t, [response([fn(), { ...fn(), call_id: 'another-call' }]), response([message(JSON.stringify(diagnosis))], 'resp-next')]);
   const model = new OpenAIAgentModel();
   const first = await model.respond({ kind: 'initial', prompt: 'incident' });
   const outputs = first.calls.map((call, i) => ({ callId: call.callId, output: JSON.stringify({ evidence: i }) }));
-  assert.deepEqual(await model.respond({ kind: 'continuation', continuation: first.continuation, outputs }), { kind: 'final', text: 'Evidence-based conclusion.' });
+  assert.deepEqual(await model.respond({ kind: 'continuation', continuation: first.continuation, outputs }), { kind: 'final', diagnosis });
   const body = JSON.parse(fetch.mock.calls[1].arguments[1].body);
   assert.equal(body.previous_response_id, 'resp-original');
   assert.equal(body.instructions, INVESTIGATION_INSTRUCTIONS);
   assert.deepEqual(body.input, outputs.map(output => ({ type: 'function_call_output', call_id: output.callId, output: output.output })));
   assert.equal(body.tools.length, 4);
+  assertDiagnosisFormat(body);
 });
 
 test('provider ignores reasoning items and does not treat text accompanying tool calls as final', async t => {
@@ -112,4 +115,52 @@ test('API failures propagate without SDK retry', async t => {
   const fetch = localTransport(t, [{ error: { message: 'local failure', type: 'server_error' } }], 500);
   await assert.rejects(new OpenAIAgentModel().respond({ kind: 'initial', prompt: 'incident' }));
   assert.equal(fetch.mock.calls.length, 1);
+});
+
+function assertDiagnosisFormat(body) {
+  assert.ok(!('response_format' in body));
+  const format = body.text.format;
+  assert.equal(format.type, 'json_schema');
+  assert.equal(format.name, 'incident_diagnosis');
+  assert.equal(format.strict, true);
+  assert.equal(format.schema.type, 'object');
+  assert.equal(format.schema.additionalProperties, false);
+  const fields = ['summary', 'probableCause', 'confidence', 'evidence', 'recommendedActions'];
+  assert.deepEqual([...format.schema.required].sort(), [...fields].sort());
+  assert.deepEqual(Object.keys(format.schema.properties).sort(), [...fields].sort());
+  assert.deepEqual(format.schema.properties.confidence.enum, ['low', 'medium', 'high']);
+  for (const field of ['summary', 'probableCause']) {
+    assert.equal(format.schema.properties[field].type, 'string');
+    assert.equal(new RegExp(format.schema.properties[field].pattern).test('  '), false);
+    assert.equal(new RegExp(format.schema.properties[field].pattern).test('valid'), true);
+  }
+  for (const field of ['evidence', 'recommendedActions']) {
+    assert.equal(format.schema.properties[field].type, 'array');
+    assert.equal(format.schema.properties[field].items.type, 'string');
+    assert.equal(new RegExp(format.schema.properties[field].items.pattern).test('\t'), false);
+  }
+}
+
+test('immediate structured response becomes a Diagnosis object', async t => {
+  const fetch = localTransport(t, [response([message(JSON.stringify(diagnosis))])]);
+  const result = await new OpenAIAgentModel().respond({ kind: 'initial', prompt: 'incident' });
+  assert.deepEqual(result, { kind: 'final', diagnosis });
+  assert.equal(typeof result.diagnosis, 'object');
+  assertDiagnosisFormat(JSON.parse(fetch.mock.calls[0].arguments[1].body));
+});
+
+test('provider rejects malformed final JSON without repairing or filling defaults', async t => {
+  const texts = ['', 'plain text', '{bad', '```json\n{}\n```'];
+  localTransport(t, texts.map(text => response([message(text)])));
+  const model = new OpenAIAgentModel();
+  for (const text of texts) await assert.rejects(model.respond({ kind: 'initial', prompt: 'incident' }), /Malformed diagnosis JSON/);
+});
+
+test('provider independently validates structured final values', async t => {
+  const values = [null, [], {}, { ...diagnosis, confidence: 0.94 }, { ...diagnosis, summary: ' ' },
+    { ...diagnosis, probableCause: null }, { ...diagnosis, evidence: [42] },
+    { ...diagnosis, recommendedActions: null }, { ...diagnosis, severity: 'critical' }];
+  localTransport(t, values.map(value => response([message(JSON.stringify(value))])));
+  const model = new OpenAIAgentModel();
+  for (const value of values) await assert.rejects(model.respond({ kind: 'initial', prompt: 'incident' }), /Malformed diagnosis/);
 });
