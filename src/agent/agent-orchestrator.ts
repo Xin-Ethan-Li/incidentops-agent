@@ -14,8 +14,9 @@ export class AgentOrchestrator {
     return this.#currentRecord && structuredClone(this.#currentRecord);
   }
 
-  constructor(private readonly model: AgentModel, private readonly executor: ToolExecutor, private readonly maxTurns = 8) {
+  constructor(private readonly model: AgentModel, private readonly executor: ToolExecutor, private readonly maxTurns = 8, private readonly maxToolCalls = 8) {
     if (!Number.isSafeInteger(maxTurns) || maxTurns <= 0) throw new TypeError('maxTurns must be a positive safe integer');
+    if (!Number.isSafeInteger(maxToolCalls) || maxToolCalls <= 0) throw new TypeError('maxToolCalls must be a positive safe integer');
   }
 
   async investigate(incident: IncidentCase): Promise<InvestigationRecord> {
@@ -29,6 +30,7 @@ export class AgentOrchestrator {
         timeWindow: { start: incident.timeWindow.start, end: incident.timeWindow.end },
       }) };
       const usedCallIds = new Set<string>();
+      let toolAttempts = 0; // Per investigation: one executor invocation consumes one of the default eight slots.
       for (let turn = 0; turn < this.maxTurns; turn++) {
         const response = await this.model.respond(request);
         assertModelResult(response);
@@ -47,6 +49,8 @@ export class AgentOrchestrator {
         }
         const outputs: AgentToolOutput[] = [];
         for (const call of response.calls) {
+          if (toolAttempts >= this.maxToolCalls) throw new Error(`Agent tool-call budget exhausted (${this.maxToolCalls})`);
+          toolAttempts++; // Count the attempt even if execute throws.
           record.status = 'INVESTIGATING';
           const execution = { callId: call.callId, toolName: call.name };
           try {
