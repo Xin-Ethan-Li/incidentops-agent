@@ -3,6 +3,7 @@ import type { InvestigationRecord } from '../domain/investigation.js';
 import type { IncidentCase } from '../domain/incident.js';
 import { assertModelResult, type AgentModel, type AgentModelRequest, type AgentToolOutput } from './agent-model.js';
 import type { ToolExecutor } from './tool-executor.js';
+import { withTimeout } from './with-timeout.js';
 
 export class AgentOrchestrator {
   #currentRecord?: InvestigationRecord;
@@ -14,9 +15,22 @@ export class AgentOrchestrator {
     return this.#currentRecord && structuredClone(this.#currentRecord);
   }
 
-  constructor(private readonly model: AgentModel, private readonly executor: ToolExecutor, private readonly maxTurns = 8, private readonly maxToolCalls = 8) {
+  constructor(
+    private readonly model: AgentModel,
+    private readonly executor: ToolExecutor,
+    private readonly maxTurns = 8,
+    private readonly maxToolCalls = 8,
+    private readonly modelTimeoutMs = 30_000,
+    private readonly toolTimeoutMs = 30_000,
+  ) {
     if (!Number.isSafeInteger(maxTurns) || maxTurns <= 0) throw new TypeError('maxTurns must be a positive safe integer');
     if (!Number.isSafeInteger(maxToolCalls) || maxToolCalls <= 0) throw new TypeError('maxToolCalls must be a positive safe integer');
+    for (const [name, value] of [['modelTimeoutMs', modelTimeoutMs], ['toolTimeoutMs', toolTimeoutMs]] as const) {
+      // Node clamps overflowing timer delays to 1ms; reject them rather than shorten the deadline.
+      if (!Number.isSafeInteger(value) || value <= 0 || value > 2_147_483_647) {
+        throw new TypeError(`${name} must be a positive safe integer no greater than 2147483647`);
+      }
+    }
   }
 
   async investigate(incident: IncidentCase): Promise<InvestigationRecord> {
@@ -32,7 +46,10 @@ export class AgentOrchestrator {
       const usedCallIds = new Set<string>();
       let toolAttempts = 0; // Per investigation: one executor invocation consumes one of the default eight slots.
       for (let turn = 0; turn < this.maxTurns; turn++) {
-        const response = await this.model.respond(request);
+        const response = await withTimeout(
+          () => this.model.respond(request), this.modelTimeoutMs,
+          `Agent model response timed out after ${this.modelTimeoutMs}ms`,
+        );
         assertModelResult(response);
         if (response.kind === 'final') {
           // Copy model-owned arrays before retaining the validated result.
@@ -54,7 +71,10 @@ export class AgentOrchestrator {
           record.status = 'INVESTIGATING';
           const execution = { callId: call.callId, toolName: call.name };
           try {
-            outputs.push(await this.executor.execute(call));
+            outputs.push(await withTimeout(
+              () => this.executor.execute(call), this.toolTimeoutMs,
+              `Agent tool execution timed out after ${this.toolTimeoutMs}ms`,
+            ));
           } catch (error) {
             record.toolExecutions.push({ ...execution, status: 'FAILED' });
             throw error;
