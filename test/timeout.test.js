@@ -189,12 +189,12 @@ test('default model timeout is 30000ms', async t => {
   assertFailed(agent, 'Agent model response timed out after 30000ms');
 });
 
-test('default tool timeout is 30000ms', async t => {
+test('default tool timeout is 30000ms with no remaining retry budget', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const started = deferred();
   const agent = new AgentOrchestrator({ async respond() { return batch('A'); } }, {
     execute() { started.resolve(); return new Promise(() => {}); },
-  });
+  }, 8, 1);
   const rejected = assert.rejects(agent.investigate(incident), { message: 'Agent tool execution timed out after 30000ms' });
   await started.promise;
   t.mock.timers.tick(29_999);

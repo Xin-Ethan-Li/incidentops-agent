@@ -5,6 +5,9 @@ export interface McpToolCaller {
   callTool(params: { name: string; arguments: Record<string, unknown> }): Promise<unknown>;
 }
 
+/** Local result-shape validation failure; retains the existing Error messages. */
+export class MalformedMcpResultError extends Error {}
+
 function argumentsObject(value: unknown, allowed: string[], required: string[]): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || Object.keys(value).some(key => !allowed.includes(key))
@@ -47,12 +50,12 @@ export class ToolExecutor {
       default: throw new Error('Tool not allowed: ' + call.name);
     }
     const result = await this.client.callTool({ name: call.name, arguments: args });
-    if (!result || typeof result !== 'object') throw new Error('Malformed MCP result');
+    if (!result || typeof result !== 'object') throw new MalformedMcpResultError('Malformed MCP result');
     const value = result as { isError?: unknown; content?: unknown };
-    if (value.isError !== undefined && typeof value.isError !== 'boolean') throw new Error('Malformed MCP result');
+    if (value.isError !== undefined && typeof value.isError !== 'boolean') throw new MalformedMcpResultError('Malformed MCP result');
     if (!Array.isArray(value.content) || value.content.length !== 1
       || value.content[0]?.type !== 'text' || typeof value.content[0].text !== 'string') {
-      throw new Error('Malformed MCP result: expected one JSON text block');
+      throw new MalformedMcpResultError('Malformed MCP result: expected one JSON text block');
     }
     const output: string = value.content[0].text;
     if (value.isError) {
@@ -67,7 +70,7 @@ export class ToolExecutor {
       }
       throw new Error('MCP tool execution failed: ' + output);
     }
-    try { JSON.parse(output); } catch { throw new Error('Malformed MCP result: invalid JSON'); }
+    try { JSON.parse(output); } catch { throw new MalformedMcpResultError('Malformed MCP result: invalid JSON'); }
     return { callId: call.callId, output };
   }
 }

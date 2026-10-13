@@ -4,6 +4,7 @@ import type { IncidentCase } from '../domain/incident.js';
 import { assertModelResult, type AgentModel, type AgentModelRequest, type AgentToolOutput } from './agent-model.js';
 import type { ToolExecutor } from './tool-executor.js';
 import { withTimeout } from './with-timeout.js';
+import { classifyToolFailure, MAX_TOOL_RETRIES, TOOL_RETRY_BACKOFF_MS } from './tool-retry-policy.js';
 
 export class AgentOrchestrator {
   #currentRecord?: InvestigationRecord;
@@ -66,20 +67,27 @@ export class AgentOrchestrator {
         }
         const outputs: AgentToolOutput[] = [];
         for (const call of response.calls) {
-          if (toolAttempts >= this.maxToolCalls) throw new Error(`Agent tool-call budget exhausted (${this.maxToolCalls})`);
-          toolAttempts++; // Count the attempt even if execute throws.
-          record.status = 'INVESTIGATING';
           const execution = { callId: call.callId, toolName: call.name };
-          try {
-            outputs.push(await withTimeout(
-              () => this.executor.execute(call), this.toolTimeoutMs,
-              `Agent tool execution timed out after ${this.toolTimeoutMs}ms`,
-            ));
-          } catch (error) {
-            record.toolExecutions.push({ ...execution, status: 'FAILED' });
-            throw error;
+          for (let attempt = 0; attempt <= MAX_TOOL_RETRIES; attempt++) {
+            if (toolAttempts >= this.maxToolCalls) throw new Error(`Agent tool-call budget exhausted (${this.maxToolCalls})`);
+            toolAttempts++; // Every actual attempt, including a retry, consumes one slot.
+            record.status = 'INVESTIGATING';
+            try {
+              outputs.push(await withTimeout(
+                () => this.executor.execute(call), this.toolTimeoutMs,
+                `Agent tool execution timed out after ${this.toolTimeoutMs}ms`,
+              ));
+            } catch (error) {
+              record.toolExecutions.push({ ...execution, status: 'FAILED' });
+              if (attempt === MAX_TOOL_RETRIES || toolAttempts >= this.maxToolCalls
+                || classifyToolFailure(call.name, error) !== 'RETRYABLE') throw error;
+              // The timed-out read may still be running; only the explicit read set can retry.
+              await new Promise<void>(resolve => setTimeout(resolve, TOOL_RETRY_BACKOFF_MS));
+              continue;
+            }
+            record.toolExecutions.push({ ...execution, status: 'SUCCEEDED' });
+            break;
           }
-          record.toolExecutions.push({ ...execution, status: 'SUCCEEDED' });
         }
         request = { kind: 'continuation', continuation: response.continuation, outputs };
       }
