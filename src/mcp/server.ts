@@ -33,8 +33,8 @@ export function createIncidentOpsServer(retriever: RunbookRetriever): McpServer 
     inputSchema: z.strictObject({ service: z.string() }),
   }, args => result(() => getServiceInfo(args)));
   server.registerTool('search_runbook', {
-    description: 'Retrieve runbook context using semantic similarity, not diagnosis confidence.',
+    description: 'Retrieve relevant runbook context. Scores indicate relevance, not diagnosis confidence.',
     inputSchema: z.strictObject({ query: z.string(), limit: z.number().nullish() }),
-  }, args => result(() => retriever.retrieve({ query: args.query, limit: args.limit ?? undefined })));
+  }, args => result(() => retriever.retrieveWithFallback({ query: args.query, limit: args.limit ?? undefined })));
   return server;
 }

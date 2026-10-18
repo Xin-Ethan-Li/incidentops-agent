@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import type { EmbeddingProvider } from './embedding-provider.js';
+import { SemanticRetrievalUnavailableError } from './semantic-retrieval-unavailable-error.js';
 
 export class OpenAIEmbeddingProvider implements EmbeddingProvider {
   private readonly client: OpenAI;
@@ -16,7 +17,14 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
       throw new TypeError('Embedding input must contain nonempty strings');
     }
     if (texts.length === 0) return [];
-    const response = await this.client.embeddings.create({ model: this.model, input: texts, encoding_format: 'float' });
+    const response = await this.client.embeddings.create({ model: this.model, input: texts, encoding_format: 'float' }).catch(error => {
+      // Only availability failures from this dependency call qualify; validation stays outside.
+      if (error instanceof OpenAI.APIConnectionError
+        || (error instanceof OpenAI.APIError && (error.status === 429 || (error.status !== undefined && error.status >= 500)))) {
+        throw new SemanticRetrievalUnavailableError(undefined, { cause: error });
+      }
+      throw error;
+    });
     if (response.data.length !== texts.length) throw new Error('Embedding vector count does not match input');
     const ordered = [...response.data].sort((a, b) => a.index - b.index);
     if (ordered.some((item, index) => item.index !== index)) throw new Error('Embedding response has invalid indices');

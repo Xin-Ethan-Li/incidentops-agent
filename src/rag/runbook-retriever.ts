@@ -2,10 +2,11 @@ import type { RunbookDocument } from '../domain/runbook.js';
 import { runbooks } from '../fixtures/index.js';
 import type { EmbeddingProvider } from './embedding-provider.js';
 import { cosineSimilarity, validateEmbeddings } from './cosine-similarity.js';
+import { SemanticRetrievalUnavailableError } from './semantic-retrieval-unavailable-error.js';
 
 export interface SemanticRunbookMatch {
   runbook: RunbookDocument;
-  /** Cosine retrieval similarity, not diagnosis confidence. */
+  /** Retrieval relevance (cosine on the primary path), not diagnosis confidence. */
   score: number;
 }
 
@@ -24,6 +25,27 @@ export class RunbookRetriever {
       `Title: ${doc.title}\nTags: ${doc.tags.join(', ')}\nContent: ${doc.content}`))
       .then(vectors => validateEmbeddings(vectors, this.documents.length));
     return this.vectors;
+  }
+
+  /** search_runbook's narrow fallback boundary; retrieve() remains purely semantic. */
+  async retrieveWithFallback(input: { query: string; limit?: number }): Promise<SemanticRunbookMatch[]> {
+    try { return await this.retrieve(input); }
+    catch (error) {
+      if (!(error instanceof SemanticRetrievalUnavailableError)) throw error;
+      return this.retrieveLexically(input);
+    }
+  }
+
+  private retrieveLexically(input: { query: string; limit?: number }): SemanticRunbookMatch[] {
+    const tokens = (text: string) => text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    const terms = [...new Set(tokens(input.query))];
+    return this.documents.map(doc => {
+      const words = new Set(tokens([doc.title, ...doc.tags, doc.content].join(' ')));
+      return { runbook: { ...doc, tags: [...doc.tags] }, score: terms.filter(term => words.has(term)).length };
+    })
+      .filter(match => match.score > 0)
+      .sort((a, b) => b.score - a.score || (a.runbook.id < b.runbook.id ? -1 : a.runbook.id > b.runbook.id ? 1 : 0))
+      .slice(0, input.limit);
   }
 
   async retrieve(input: { query: string; limit?: number }): Promise<SemanticRunbookMatch[]> {
