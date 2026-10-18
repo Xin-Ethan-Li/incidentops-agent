@@ -218,7 +218,12 @@ test('future risky or unknown tool names do not inherit timeout retry', async t 
     assert.equal(classifyToolFailure(name, new SdkError(SdkErrorCode.RequestTimeout, 'SDK timeout')), 'NON_RETRYABLE');
   }
   const { agent, run, attempts, requests } = start(t, () => new Promise(() => {}), { calls: [call('A', 'restart_service')] });
-  const rejected = assert.rejects(run, error => error instanceof OperationTimeoutError && error.message === timeoutMessage);
+  const waiting = await run;
+  assert.equal(waiting.status, 'AWAITING_APPROVAL');
+  assert.equal(attempts.length, 0);
+  const rejected = assert.rejects(agent.resolveApproval({ investigationId: waiting.investigationId,
+    approvalId: waiting.pendingApproval.approvalId, decision: 'approve' }),
+  error => error instanceof OperationTimeoutError && error.message === timeoutMessage);
   await nextTurn();
   await advance(t, 5);
   await rejected;

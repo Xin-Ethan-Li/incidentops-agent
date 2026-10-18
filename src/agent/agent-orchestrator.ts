@@ -6,8 +6,17 @@ import type { ToolExecutor } from './tool-executor.js';
 import { withTimeout } from './with-timeout.js';
 import { classifyToolFailure, MAX_TOOL_RETRIES, TOOL_RETRY_BACKOFF_MS } from './tool-retry-policy.js';
 
+export interface ApprovalDecision {
+  investigationId: string;
+  approvalId: string;
+  decision: 'approve' | 'reject';
+}
+
+type InvestigationWorkflow = AsyncGenerator<InvestigationRecord, InvestigationRecord, ApprovalDecision['decision'] | undefined>;
+
 export class AgentOrchestrator {
   #currentRecord?: InvestigationRecord;
+  #pending = new Map<string, { record: InvestigationRecord; workflow: InvestigationWorkflow }>();
 
   /** Detached snapshot of the most recently started run, including its terminal state.
    * Overlapping runs retain independent local records; this getter follows the latest start.
@@ -39,6 +48,35 @@ export class AgentOrchestrator {
       investigationId: randomUUID(), incidentId: incident.id, status: 'STARTED', toolExecutions: [],
     };
     this.#currentRecord = record;
+    return this.advance(record, this.run(record, incident));
+  }
+
+  /** Trusted application caller only; the model/MCP never supplies approval decisions. */
+  async resolveApproval(input: ApprovalDecision): Promise<InvestigationRecord> {
+    if (!input || typeof input !== 'object' || Array.isArray(input)
+      || Reflect.ownKeys(input).length !== 3
+      || Reflect.ownKeys(input).some(key => !['investigationId', 'approvalId', 'decision'].includes(String(key)))) {
+      throw new TypeError('Approval decision must contain only investigationId, approvalId and decision');
+    }
+    const { investigationId, approvalId, decision } = input;
+    if (typeof investigationId !== 'string' || typeof approvalId !== 'string'
+      || (decision !== 'approve' && decision !== 'reject')) throw new TypeError('Invalid approval decision');
+    const pending = this.#pending.get(investigationId);
+    if (!pending || pending.record.status !== 'AWAITING_APPROVAL'
+      || pending.record.pendingApproval?.approvalId !== approvalId) throw new Error('Unknown, mismatched or consumed approval');
+    // Atomically claim before any await: even an execution timeout cannot authorize replay.
+    this.#pending.delete(investigationId);
+    return this.advance(pending.record, pending.workflow, decision);
+  }
+
+  private async advance(record: InvestigationRecord, workflow: InvestigationWorkflow, decision?: ApprovalDecision['decision']): Promise<InvestigationRecord> {
+    const step = await workflow.next(decision);
+    if (!step.done) this.#pending.set(record.investigationId, { record, workflow });
+    return step.value;
+  }
+
+  /** The suspended generator retains the original loop counters, IDs, batch and outputs. */
+  private async *run(record: InvestigationRecord, incident: IncidentCase): InvestigationWorkflow {
     try {
       let request: AgentModelRequest = { kind: 'initial', prompt: JSON.stringify({
         id: incident.id, title: incident.title, service: incident.service, description: incident.description,
@@ -61,12 +99,30 @@ export class AgentOrchestrator {
           return completed;
         }
         if (turn + 1 === this.maxTurns) break; // Do not execute tools whose results cannot be consumed.
-        for (const call of response.calls) {
+        // A model-owned batch may outlive this call while suspended. Retain its exact proposal.
+        const calls = response.calls.some(call => call.name === 'restart_service') ? structuredClone(response.calls) : response.calls;
+        const continuation = response.continuation;
+        for (const call of calls) {
           if (usedCallIds.has(call.callId)) throw new Error('Reused tool callId');
           usedCallIds.add(call.callId);
         }
         const outputs: AgentToolOutput[] = [];
-        for (const call of response.calls) {
+        for (const call of calls) {
+          if (call.name === 'restart_service') {
+            record.pendingApproval = {
+              investigationId: record.investigationId, approvalId: randomUUID(), callId: call.callId,
+              toolName: 'restart_service', arguments: structuredClone(call.arguments as Record<string, unknown>),
+            };
+            record.status = 'AWAITING_APPROVAL';
+            const decision = yield structuredClone(record);
+            delete record.pendingApproval;
+            if (decision === 'reject') {
+              record.status = 'REJECTED';
+              record.rejection = 'Human rejected restart_service';
+              return structuredClone(record);
+            }
+            if (decision !== 'approve') throw new Error('Missing explicit human approval');
+          }
           const execution = { callId: call.callId, toolName: call.name };
           for (let attempt = 0; attempt <= MAX_TOOL_RETRIES; attempt++) {
             if (toolAttempts >= this.maxToolCalls) throw new Error(`Agent tool-call budget exhausted (${this.maxToolCalls})`);
@@ -89,7 +145,7 @@ export class AgentOrchestrator {
             break;
           }
         }
-        request = { kind: 'continuation', continuation: response.continuation, outputs };
+        request = { kind: 'continuation', continuation, outputs };
       }
       throw new Error(`Agent model turn limit reached (${this.maxTurns})`);
     } catch (error) {

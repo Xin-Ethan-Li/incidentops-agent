@@ -38,6 +38,7 @@ export class ToolExecutor {
         argumentsObject(args.timeWindow, ['start', 'end'], ['start', 'end']);
         break;
       case 'get_service_info':
+      case 'restart_service':
         args = argumentsObject(call.arguments, ['service'], ['service']); break;
       case 'search_runbook':
         args = argumentsObject(call.arguments, ['query', 'limit'], ['query']);

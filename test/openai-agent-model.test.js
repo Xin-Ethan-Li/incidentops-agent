@@ -39,7 +39,7 @@ test('Responses first request includes strict tools and instructions and maps ca
   assert.equal(body.parallel_tool_calls, false);
   assertDiagnosisFormat(body);
   assert.ok(!('previous_response_id' in body));
-  assert.deepEqual(body.tools.map(tool => tool.name), ['search_logs', 'get_metrics', 'get_service_info', 'search_runbook']);
+  assert.deepEqual(body.tools.map(tool => tool.name), ['search_logs', 'get_metrics', 'get_service_info', 'search_runbook', 'restart_service']);
   function strictObjects(schema) {
     if (schema.type === 'object') {
       assert.equal(schema.additionalProperties, false);
@@ -62,7 +62,7 @@ test('continuation sends previous response ID and original call IDs, repeats ins
   assert.equal(body.previous_response_id, 'resp-original');
   assert.equal(body.instructions, INVESTIGATION_INSTRUCTIONS);
   assert.deepEqual(body.input, outputs.map(output => ({ type: 'function_call_output', call_id: output.callId, output: output.output })));
-  assert.equal(body.tools.length, 4);
+  assert.equal(body.tools.length, 5);
   assertDiagnosisFormat(body);
 });
 

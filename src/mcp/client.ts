@@ -2,7 +2,7 @@ import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport, type StdioServerParameters } from '@modelcontextprotocol/client/stdio';
 import { fileURLToPath } from 'node:url';
 
-/** One caller-owned connection. Always close in finally after the investigation. */
+/** Caller-owned connection: keep open across approval suspension; close in finally after the terminal outcome. */
 export class IncidentOpsMcpClient {
   private readonly client = new Client({ name: 'incidentops-agent', version: '1.0.0' });
   private readonly transport: StdioClientTransport;

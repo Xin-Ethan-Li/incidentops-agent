@@ -22,11 +22,11 @@ async function connect(t) {
   return client;
 }
 
-test('real stdio discovers exactly four read tools and executes all through existing business logic', async t => {
+test('real stdio discovers four read tools plus one simulated action and preserves read business logic', async t => {
   t.mock.method(globalThis, 'fetch', () => assert.fail('No external network'));
   const client = await connect(t);
   const listing = await client.listTools();
-  assert.deepEqual(listing.tools.map(tool => tool.name).sort(), ['get_metrics', 'get_service_info', 'search_logs', 'search_runbook']);
+  assert.deepEqual(listing.tools.map(tool => tool.name).sort(), ['get_metrics', 'get_service_info', 'restart_service', 'search_logs', 'search_runbook']);
   for (const tool of listing.tools) {
     assert.ok(tool.description);
     assert.equal(tool.inputSchema.type, 'object');
@@ -135,6 +135,32 @@ for (const [args, message] of [
     assert.ok(!agent.currentRecord.diagnosis);
   });
 }
+
+test('real stdio executes only an approved simulated restart and returns its evidence once', async t => {
+  const client = await connect(t);
+  const mcp = t.mock.method(client, 'callTool');
+  let turns = 0;
+  const model = { async respond(request) {
+    if (++turns === 1) return { kind: 'tool_calls', continuation: 'restart-response', calls: [
+      call('restart_service', { service: incident.service }, 'restart-id'),
+    ] };
+    assert.equal(request.continuation, 'restart-response');
+    assert.deepEqual(request.outputs.map(item => item.callId), ['restart-id']);
+    assert.deepEqual(JSON.parse(request.outputs[0].output), {
+      service: incident.service, action: 'restart_service', simulated: true, status: 'SIMULATED',
+    });
+    return { kind: 'final', diagnosis: { summary: 'Simulated action completed.', probableCause: 'Further investigation needed.', confidence: 'medium', evidence: [], recommendedActions: [] } };
+  } };
+  const agent = new AgentOrchestrator(model, new ToolExecutor(client), 2, 1);
+  const waiting = await agent.investigate(incident);
+  assert.equal(waiting.status, 'AWAITING_APPROVAL');
+  assert.equal(mcp.mock.callCount(), 0);
+  const result = await agent.resolveApproval({ investigationId: waiting.investigationId,
+    approvalId: waiting.pendingApproval.approvalId, decision: 'approve' });
+  assert.equal(result.status, 'COMPLETED');
+  assert.equal(mcp.mock.callCount(), 1);
+  assert.deepEqual(result.toolExecutions, [{ callId: 'restart-id', toolName: 'restart_service', status: 'SUCCEEDED' }]);
+});
 
 test('unrecognized MCP errors remain generic failures, never INVALID_INPUT', async () => {
   for (const text of ['upstream unavailable', '{}', JSON.stringify({ error: { name: 'ToolError', code: 'UNKNOWN', message: 'unknown failure' } })]) {

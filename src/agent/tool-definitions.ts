@@ -36,4 +36,8 @@ export const TOOL_DEFINITIONS = [
       required: ['query', 'limit'],
     },
   },
+  {
+    name: 'restart_service', description: 'Propose a simulated service restart. Requires explicit human approval enforced by the application; the model cannot approve it. No real infrastructure is changed.',
+    parameters: { type: 'object', additionalProperties: false, properties: { service: { type: 'string' } }, required: ['service'] },
+  },
 ];

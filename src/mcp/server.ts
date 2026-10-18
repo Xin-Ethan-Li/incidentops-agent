@@ -1,6 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod/v4';
-import { searchLogs, getMetrics, getServiceInfo, ToolError } from '../tools/index.js';
+import { searchLogs, getMetrics, getServiceInfo, restartService, ToolError } from '../tools/index.js';
 import type { RunbookRetriever } from '../rag/runbook-retriever.js';
 
 const windowSchema = z.strictObject({ start: z.string(), end: z.string() });
@@ -36,5 +36,9 @@ export function createIncidentOpsServer(retriever: RunbookRetriever): McpServer 
     description: 'Retrieve relevant runbook context. Scores indicate relevance, not diagnosis confidence.',
     inputSchema: z.strictObject({ query: z.string(), limit: z.number().nullish() }),
   }, args => result(() => retriever.retrieveWithFallback({ query: args.query, limit: args.limit ?? undefined })));
+  server.registerTool('restart_service', {
+    description: 'Simulate a service restart after application-enforced human approval. No real infrastructure changes.',
+    inputSchema: z.strictObject({ service: z.string() }),
+  }, args => result(() => restartService(args)));
   return server;
 }
