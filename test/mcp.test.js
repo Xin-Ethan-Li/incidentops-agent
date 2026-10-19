@@ -1,26 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
-import { IncidentOpsMcpClient } from '../dist/mcp/client.js';
+import { connectTestMcpClient as connect } from './fixtures/mcp-stdio.js';
 import { ToolExecutor, AgentOrchestrator } from '../dist/agent/index.js';
 import { searchLogs, getMetrics, getServiceInfo, ToolError } from '../dist/tools/index.js';
 import { incidents, runbooks } from '../dist/fixtures/index.js';
 
 const incident = incidents[0];
 const call = (name, args, callId = 'agent-original-call-id') => ({ name, arguments: args, callId });
-const parameters = { command: process.execPath, args: [fileURLToPath(new URL('./fixtures/mcp-stdio-server.js', import.meta.url))], env: {} };
-async function connect(t) {
-  const client = new IncidentOpsMcpClient(parameters);
-  let pid;
-  t.after(async () => {
-    await client.close();
-    if (pid) assert.throws(() => process.kill(pid, 0), error => error.code === 'ESRCH', 'MCP child must exit after close');
-  });
-  await client.connect();
-  pid = client.pid;
-  assert.ok(Number.isInteger(pid) && pid !== process.pid, 'Separate Node child process');
-  return client;
-}
 
 test('real stdio discovers four read tools plus one simulated action and preserves read business logic', async t => {
   t.mock.method(globalThis, 'fetch', () => assert.fail('No external network'));
