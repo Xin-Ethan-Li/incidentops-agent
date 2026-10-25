@@ -3,9 +3,10 @@ import type { InvestigationRecord } from '../domain/investigation.js';
 import type { IncidentCase } from '../domain/incident.js';
 import { assertModelResult, type AgentModel, type AgentModelRequest, type AgentModelResult, type AgentToolOutput } from './agent-model.js';
 import type { ToolExecutor } from './tool-executor.js';
-import { withTimeout } from './with-timeout.js';
+import { observeSafely, withTimeout } from './with-timeout.js';
 import { classifyToolFailure, MAX_TOOL_RETRIES, TOOL_RETRY_BACKOFF_MS } from './tool-retry-policy.js';
 import type { InvestigationMeasurements } from '../measurement/collector.js';
+import type { InvestigationTracing } from '../tracing/investigation-tracing.js';
 
 export interface ApprovalDecision {
   investigationId: string;
@@ -34,6 +35,7 @@ export class AgentOrchestrator {
     private readonly modelTimeoutMs = 30_000,
     private readonly toolTimeoutMs = 30_000,
     private readonly measurements?: InvestigationMeasurements,
+    private readonly tracing?: InvestigationTracing,
   ) {
     if (!Number.isSafeInteger(maxTurns) || maxTurns <= 0) throw new TypeError('maxTurns must be a positive safe integer');
     if (!Number.isSafeInteger(maxToolCalls) || maxToolCalls <= 0) throw new TypeError('maxToolCalls must be a positive safe integer');
@@ -50,7 +52,8 @@ export class AgentOrchestrator {
       investigationId: randomUUID(), incidentId: incident.id, status: 'STARTED', toolExecutions: [],
     };
     this.#currentRecord = record;
-    this.measurements?.start(record);
+    observeSafely(() => this.measurements?.start(record));
+    observeSafely(() => this.tracing?.start(record.investigationId));
     return this.advance(record, this.run(record, incident));
   }
 
@@ -69,7 +72,8 @@ export class AgentOrchestrator {
       || pending.record.pendingApproval?.approvalId !== approvalId) throw new Error('Unknown, mismatched or consumed approval');
     // Atomically claim before any await: even an execution timeout cannot authorize replay.
     this.#pending.delete(investigationId);
-    this.measurements?.resume(investigationId);
+    observeSafely(() => this.measurements?.resume(investigationId));
+    observeSafely(() => this.tracing?.resume(investigationId));
     return this.advance(pending.record, pending.workflow, decision);
   }
 
@@ -78,11 +82,16 @@ export class AgentOrchestrator {
       const step = await workflow.next(decision);
       if (!step.done) {
         this.#pending.set(record.investigationId, { record, workflow });
-        this.measurements?.suspend(record.investigationId);
-      } else this.measurements?.finish(record.investigationId, step.value.status);
+        observeSafely(() => this.measurements?.suspend(record.investigationId));
+        observeSafely(() => this.tracing?.suspend(record.investigationId));
+      } else {
+        observeSafely(() => this.measurements?.finish(record.investigationId, step.value.status));
+        observeSafely(() => this.tracing?.finish(record.investigationId, step.value.status));
+      }
       return step.value;
     } catch (error) {
-      this.measurements?.finish(record.investigationId, record.status);
+      observeSafely(() => this.measurements?.finish(record.investigationId, record.status));
+      observeSafely(() => this.tracing?.finish(record.investigationId, record.status, error));
       throw error;
     }
   }
@@ -100,7 +109,8 @@ export class AgentOrchestrator {
         const response: AgentModelResult = await withTimeout(
           () => this.model.respond(request), this.modelTimeoutMs,
           `Agent model response timed out after ${this.modelTimeoutMs}ms`,
-          this.measurements?.model(record.investigationId, request.kind),
+          observeSafely(() => this.measurements?.model(record.investigationId, request.kind)),
+          observeSafely(() => this.tracing?.model(record.investigationId, request.kind)),
         );
         assertModelResult(response);
         if (response.kind === 'final') {
@@ -145,7 +155,8 @@ export class AgentOrchestrator {
               outputs.push(await withTimeout(
                 () => this.executor.execute(call), this.toolTimeoutMs,
                 `Agent tool execution timed out after ${this.toolTimeoutMs}ms`,
-                this.measurements?.tool(record.investigationId, call.callId, call.name),
+                observeSafely(() => this.measurements?.tool(record.investigationId, call.callId, call.name)),
+                observeSafely(() => this.tracing?.tool(record.investigationId, call.name, attempt + 1)),
               ));
             } catch (error) {
               record.toolExecutions.push({ ...execution, status: 'FAILED' });
