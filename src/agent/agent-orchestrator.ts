@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { InvestigationRecord } from '../domain/investigation.js';
 import type { IncidentCase } from '../domain/incident.js';
-import { assertModelResult, type AgentModel, type AgentModelRequest, type AgentToolOutput } from './agent-model.js';
+import { assertModelResult, type AgentModel, type AgentModelRequest, type AgentModelResult, type AgentToolOutput } from './agent-model.js';
 import type { ToolExecutor } from './tool-executor.js';
 import { withTimeout } from './with-timeout.js';
 import { classifyToolFailure, MAX_TOOL_RETRIES, TOOL_RETRY_BACKOFF_MS } from './tool-retry-policy.js';
+import type { InvestigationMeasurements } from '../measurement/collector.js';
 
 export interface ApprovalDecision {
   investigationId: string;
@@ -32,6 +33,7 @@ export class AgentOrchestrator {
     private readonly maxToolCalls = 8,
     private readonly modelTimeoutMs = 30_000,
     private readonly toolTimeoutMs = 30_000,
+    private readonly measurements?: InvestigationMeasurements,
   ) {
     if (!Number.isSafeInteger(maxTurns) || maxTurns <= 0) throw new TypeError('maxTurns must be a positive safe integer');
     if (!Number.isSafeInteger(maxToolCalls) || maxToolCalls <= 0) throw new TypeError('maxToolCalls must be a positive safe integer');
@@ -48,6 +50,7 @@ export class AgentOrchestrator {
       investigationId: randomUUID(), incidentId: incident.id, status: 'STARTED', toolExecutions: [],
     };
     this.#currentRecord = record;
+    this.measurements?.start(record);
     return this.advance(record, this.run(record, incident));
   }
 
@@ -66,13 +69,22 @@ export class AgentOrchestrator {
       || pending.record.pendingApproval?.approvalId !== approvalId) throw new Error('Unknown, mismatched or consumed approval');
     // Atomically claim before any await: even an execution timeout cannot authorize replay.
     this.#pending.delete(investigationId);
+    this.measurements?.resume(investigationId);
     return this.advance(pending.record, pending.workflow, decision);
   }
 
   private async advance(record: InvestigationRecord, workflow: InvestigationWorkflow, decision?: ApprovalDecision['decision']): Promise<InvestigationRecord> {
-    const step = await workflow.next(decision);
-    if (!step.done) this.#pending.set(record.investigationId, { record, workflow });
-    return step.value;
+    try {
+      const step = await workflow.next(decision);
+      if (!step.done) {
+        this.#pending.set(record.investigationId, { record, workflow });
+        this.measurements?.suspend(record.investigationId);
+      } else this.measurements?.finish(record.investigationId, step.value.status);
+      return step.value;
+    } catch (error) {
+      this.measurements?.finish(record.investigationId, record.status);
+      throw error;
+    }
   }
 
   /** The suspended generator retains the original loop counters, IDs, batch and outputs. */
@@ -85,9 +97,10 @@ export class AgentOrchestrator {
       const usedCallIds = new Set<string>();
       let toolAttempts = 0; // Per investigation: one executor invocation consumes one of the default eight slots.
       for (let turn = 0; turn < this.maxTurns; turn++) {
-        const response = await withTimeout(
+        const response: AgentModelResult = await withTimeout(
           () => this.model.respond(request), this.modelTimeoutMs,
           `Agent model response timed out after ${this.modelTimeoutMs}ms`,
+          this.measurements?.model(record.investigationId, request.kind),
         );
         assertModelResult(response);
         if (response.kind === 'final') {
@@ -101,7 +114,7 @@ export class AgentOrchestrator {
         if (turn + 1 === this.maxTurns) break; // Do not execute tools whose results cannot be consumed.
         // A model-owned batch may outlive this call while suspended. Retain its exact proposal.
         const calls = response.calls.some(call => call.name === 'restart_service') ? structuredClone(response.calls) : response.calls;
-        const continuation = response.continuation;
+        const continuation: string = response.continuation;
         for (const call of calls) {
           if (usedCallIds.has(call.callId)) throw new Error('Reused tool callId');
           usedCallIds.add(call.callId);
@@ -132,6 +145,7 @@ export class AgentOrchestrator {
               outputs.push(await withTimeout(
                 () => this.executor.execute(call), this.toolTimeoutMs,
                 `Agent tool execution timed out after ${this.toolTimeoutMs}ms`,
+                this.measurements?.tool(record.investigationId, call.callId, call.name),
               ));
             } catch (error) {
               record.toolExecutions.push({ ...execution, status: 'FAILED' });

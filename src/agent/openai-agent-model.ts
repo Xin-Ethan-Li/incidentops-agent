@@ -2,6 +2,7 @@ import OpenAI from 'openai';
 import { assertDiagnosis, DIAGNOSIS_SCHEMA } from '../domain/diagnosis.js';
 import { assertModelResult, INVESTIGATION_INSTRUCTIONS, type AgentModel, type AgentModelRequest, type AgentModelResult, type AgentToolCall } from './agent-model.js';
 import { TOOL_DEFINITIONS } from './tool-definitions.js';
+import { associateProviderUsage, providerUsage } from '../measurement/provider-usage.js';
 
 export class OpenAIAgentModel implements AgentModel {
   private readonly client: OpenAI;
@@ -35,37 +36,44 @@ export class OpenAIAgentModel implements AgentModel {
           type: 'function_call_output' as const, call_id: output.callId, output: output.output,
         })) }),
     });
-    if (response.status !== 'completed' || response.error) throw new Error(`OpenAI response did not complete: ${response.status}`);
-    if (typeof response.id !== 'string' || !response.id.trim() || !Array.isArray(response.output)) throw new Error('Malformed OpenAI response');
-    const calls: AgentToolCall[] = [];
-    const texts: string[] = [];
-    for (const item of response.output) {
-      if (item.type === 'function_call') {
-        if (item.status && item.status !== 'completed') throw new Error('Incomplete function call');
-        if (typeof item.arguments !== 'string') throw new Error('Malformed function arguments');
-        let args: unknown;
-        try { args = JSON.parse(item.arguments); } catch { throw new Error('Malformed function arguments JSON'); }
-        calls.push({ callId: item.call_id, name: item.name, arguments: args });
-      } else if (item.type === 'message') {
-        if (item.role !== 'assistant' || item.status !== 'completed' || !Array.isArray(item.content)) throw new Error('Malformed assistant message');
-        for (const content of item.content) {
-          if (content.type !== 'output_text' || typeof content.text !== 'string') throw new Error('Unsupported or refused model response');
-          texts.push(content.text);
+    const usage = providerUsage(response?.usage);
+    try {
+      if (response.status !== 'completed' || response.error) throw new Error(`OpenAI response did not complete: ${response.status}`);
+      if (typeof response.id !== 'string' || !response.id.trim() || !Array.isArray(response.output)) throw new Error('Malformed OpenAI response');
+      const calls: AgentToolCall[] = [];
+      const texts: string[] = [];
+      for (const item of response.output) {
+        if (item.type === 'function_call') {
+          if (item.status && item.status !== 'completed') throw new Error('Incomplete function call');
+          if (typeof item.arguments !== 'string') throw new Error('Malformed function arguments');
+          let args: unknown;
+          try { args = JSON.parse(item.arguments); } catch { throw new Error('Malformed function arguments JSON'); }
+          calls.push({ callId: item.call_id, name: item.name, arguments: args });
+        } else if (item.type === 'message') {
+          if (item.role !== 'assistant' || item.status !== 'completed' || !Array.isArray(item.content)) throw new Error('Malformed assistant message');
+          for (const content of item.content) {
+            if (content.type !== 'output_text' || typeof content.text !== 'string') throw new Error('Unsupported or refused model response');
+            texts.push(content.text);
+          }
+        } else if (item.type !== 'reasoning') {
+          throw new Error(`Unsupported model output: ${item.type}`);
         }
-      } else if (item.type !== 'reasoning') {
-        throw new Error(`Unsupported model output: ${item.type}`);
       }
+      let result: AgentModelResult;
+      if (calls.length) {
+        result = { kind: 'tool_calls', continuation: response.id, calls };
+      } else {
+        let diagnosis: unknown;
+        try { diagnosis = JSON.parse(texts.join('\n')); } catch { throw new Error('Malformed diagnosis JSON'); }
+        assertDiagnosis(diagnosis);
+        result = { kind: 'final', diagnosis };
+      }
+      assertModelResult(result);
+      associateProviderUsage(result, usage);
+      return result;
+    } catch (error) {
+      associateProviderUsage(error, usage);
+      throw error;
     }
-    let result: AgentModelResult;
-    if (calls.length) {
-      result = { kind: 'tool_calls', continuation: response.id, calls };
-    } else {
-      let diagnosis: unknown;
-      try { diagnosis = JSON.parse(texts.join('\n')); } catch { throw new Error('Malformed diagnosis JSON'); }
-      assertDiagnosis(diagnosis);
-      result = { kind: 'final', diagnosis };
-    }
-    assertModelResult(result);
-    return result;
   }
 }
