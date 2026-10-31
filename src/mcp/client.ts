@@ -14,9 +14,12 @@ export class IncidentOpsMcpClient {
   }) { this.transport = new StdioClientTransport(parameters); }
 
   get pid(): number | null { return this.transport.pid; }
-  async connect(): Promise<void> {
-    try { await this.client.connect(this.transport); }
-    catch (error) { await this.transport.close(); throw error; }
+  async connect(options?: Parameters<Client['connect']>[1]): Promise<void> {
+    try { await this.client.connect(this.transport, options); }
+    catch (error) {
+      try { await this.transport.close(); } catch { /* Preserve the initialization failure. */ }
+      throw error;
+    }
   }
   listTools() { return this.client.listTools(); }
   callTool(params: { name: string; arguments: Record<string, unknown> }) { return this.client.callTool(params); }

@@ -4,11 +4,26 @@ import { assertModelResult, INVESTIGATION_INSTRUCTIONS, type AgentModel, type Ag
 import { TOOL_DEFINITIONS } from './tool-definitions.js';
 import { associateProviderUsage, providerUsage } from '../measurement/provider-usage.js';
 
+export interface OpenAIAgentModelOptions {
+  readOnly?: boolean;
+  maxOutputTokens?: number;
+  requestTimeoutMs?: number;
+  signal?: AbortSignal;
+}
+
 export class OpenAIAgentModel implements AgentModel {
   private readonly client: OpenAI;
   private readonly model: string;
+  private readonly options: OpenAIAgentModelOptions;
 
-  constructor() {
+  constructor(options: OpenAIAgentModelOptions = {}) {
+    if (options.readOnly !== undefined && typeof options.readOnly !== 'boolean') throw new TypeError('readOnly must be boolean');
+    for (const [name, value] of [['maxOutputTokens', options.maxOutputTokens], ['requestTimeoutMs', options.requestTimeoutMs]] as const) {
+      if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0
+        || (name === 'requestTimeoutMs' && value > 2_147_483_647))) throw new TypeError('Invalid ' + name);
+    }
+    if (options.signal !== undefined && !(options.signal instanceof AbortSignal)) throw new TypeError('Invalid cancellation signal');
+    this.options = { ...options };
     const apiKey = process.env.OPENAI_API_KEY;
     const model = process.env.OPENAI_AGENT_MODEL;
     if (!apiKey?.trim()) throw new Error('OPENAI_API_KEY is required');
@@ -27,15 +42,18 @@ export class OpenAIAgentModel implements AgentModel {
     const response = await this.client.responses.create({
       model: this.model,
       instructions: INVESTIGATION_INSTRUCTIONS, // previous_response_id does not carry instructions forward.
-      tools: TOOL_DEFINITIONS.map(definition => ({ type: 'function' as const, ...definition, strict: true })),
+      tools: TOOL_DEFINITIONS.filter(definition => !this.options.readOnly || definition.name !== 'restart_service')
+        .map(definition => ({ type: 'function' as const, ...definition, strict: true })),
       parallel_tool_calls: false,
+      ...(this.options.maxOutputTokens === undefined ? {} : { max_output_tokens: this.options.maxOutputTokens }),
       text: { format: { type: 'json_schema', name: 'incident_diagnosis', schema: DIAGNOSIS_SCHEMA, strict: true } },
       ...(request.kind === 'initial'
         ? { input: request.prompt }
         : { previous_response_id: request.continuation, input: request.outputs.map(output => ({
           type: 'function_call_output' as const, call_id: output.callId, output: output.output,
         })) }),
-    });
+    }, { ...(this.options.requestTimeoutMs === undefined ? {} : { timeout: this.options.requestTimeoutMs }),
+      ...(this.options.signal === undefined ? {} : { signal: this.options.signal }) });
     const usage = providerUsage(response?.usage);
     try {
       if (response.status !== 'completed' || response.error) throw new Error(`OpenAI response did not complete: ${response.status}`);
