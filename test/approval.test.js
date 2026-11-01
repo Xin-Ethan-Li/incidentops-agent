@@ -202,19 +202,48 @@ test('repeated approval after completion cannot replay the simulated action', as
   assert.equal(agent.currentRecord.status, 'COMPLETED');
 });
 
-test('concurrent approve/approve/reject claims execute at most once before the first await', async () => {
+test('concurrent approve/approve/reject claims execute at most once before the first await', async t => {
+  const originalSetTimeout = globalThis.setTimeout;
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  assert.notEqual(globalThis.setTimeout, originalSetTimeout);
+  // Spy on the actual global binding used by withTimeout, delegating to MockTimers.
+  const scheduled = t.mock.method(globalThis, 'setTimeout');
+  t.after(() => { scheduled.mock.restore(); t.mock.timers.reset(); });
   const pending = deferred();
-  const { agent, calls } = setup(undefined, { execute: () => pending.promise });
+  const entered = deferred();
+  const { agent, calls, model } = setup(undefined, { execute: () => {
+    entered.resolve();
+    return pending.promise;
+  } });
   const waiting = await agent.investigate(incident);
   const first = agent.resolveApproval(decision(waiting));
   const second = assert.rejects(agent.resolveApproval(decision(waiting)), /consumed approval/);
   const reject = assert.rejects(agent.resolveApproval(decision(waiting, 'reject')), /consumed approval/);
-  await nextTurn();
-  assert.equal(calls.length, 1);
-  pending.resolve(output(risky()));
-  assert.equal((await first).status, 'COMPLETED');
-  await second;
-  await reject;
+  // Observe all three promises before any await; assertion failures remain outcomes.
+  const settled = Promise.allSettled([first, second, reject]);
+  let outcomes;
+  try {
+    await entered.promise;
+    assert.equal(scheduled.mock.calls.filter(call => call.arguments[1] === 5).length, 1,
+      'The real tool deadline must use the mocked global setTimeout with the unchanged 5ms limit');
+    t.mock.timers.tick(4);
+    // Both competing decisions must reject while the first executor is still pending.
+    await Promise.all([second, reject]);
+    assert.equal(calls.length, 1);
+    assert.equal(agent.currentRecord.status, 'INVESTIGATING');
+    assert.deepEqual(agent.currentRecord.toolExecutions, []);
+    assert.equal(model.seen.length, 1);
+  } finally {
+    pending.resolve(output(risky()));
+    outcomes = await settled;
+  }
+  assert.deepEqual(outcomes.map(outcome => outcome.status), ['fulfilled', 'fulfilled', 'fulfilled']);
+  assert.equal(outcomes[0].value.status, 'COMPLETED');
+  assert.deepEqual(calls, [risky()]);
+  assert.equal(agent.currentRecord.status, 'COMPLETED');
+  assert.deepEqual(agent.currentRecord.toolExecutions, [entry('B', 'restart_service')]);
+  assert.equal(model.seen.length, 2);
+  assert.deepEqual(model.seen[1].outputs, [output(risky())]);
 });
 
 test('a concurrent rejection claims the approval and prevents a competing approval from executing', async () => {
