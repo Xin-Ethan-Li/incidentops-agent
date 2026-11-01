@@ -45,3 +45,4 @@
 **/temp
 **/*.tmp
 **/*.log
+test/aws-deployment.test.js

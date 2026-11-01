@@ -1,0 +1,457 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "IncidentOps Agent standalone Fargate task. Offline-authored; deploy only after separate AWS and spending authorization.",
+  "Parameters": {
+    "ProjectName": {
+      "Type": "String",
+      "Default": "incidentops-agent",
+      "AllowedPattern": "^[a-z][a-z0-9-]{2,40}$"
+    },
+    "VpcId": {
+      "Type": "AWS::EC2::VPC::Id",
+      "Description": "Explicit existing VPC; no network topology is created."
+    },
+    "EnableTaskDefinition": {
+      "Type": "String",
+      "Default": "false",
+      "AllowedValues": [
+        "false",
+        "true"
+      ]
+    },
+    "ImageDigest": {
+      "Type": "String",
+      "Default": "",
+      "AllowedPattern": "^$|^sha256:[a-f0-9]{64}$",
+      "Description": "Actual ECR registry manifest digest, not local Docker image ID."
+    },
+    "OpenAIKeyParameterArn": {
+      "Type": "String",
+      "Default": "",
+      "AllowedPattern": "^$|^arn:(aws|aws-cn|aws-us-gov):ssm:[a-z0-9-]+:[0-9]{12}:parameter/[A-Za-z0-9_./-]+$",
+      "Description": "ARN of an existing Standard SecureString. Never supply a secret value."
+    },
+    "OpenAIModel": {
+      "Type": "String",
+      "Default": "",
+      "AllowedPattern": "^[A-Za-z0-9._:/-]{0,128}$",
+      "Description": "Explicitly approved model ID; non-secret."
+    },
+    "CustomerManagedKmsKeyArn": {
+      "Type": "String",
+      "Default": "",
+      "AllowedPattern": "^$|^arn:(aws|aws-cn|aws-us-gov):kms:[a-z0-9-]+:[0-9]{12}:key/[A-Za-z0-9-]+$",
+      "Description": "Only supply if the existing SecureString uses this customer-managed KMS key."
+    }
+  },
+  "Rules": {
+    "CompleteActivationInputs": {
+      "RuleCondition": {
+        "Fn::Equals": [
+          {
+            "Ref": "EnableTaskDefinition"
+          },
+          "true"
+        ]
+      },
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::And": [
+              {
+                "Fn::Not": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "ImageDigest"
+                      },
+                      ""
+                    ]
+                  }
+                ]
+              },
+              {
+                "Fn::Not": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "OpenAIKeyParameterArn"
+                      },
+                      ""
+                    ]
+                  }
+                ]
+              },
+              {
+                "Fn::Not": [
+                  {
+                    "Fn::Equals": [
+                      {
+                        "Ref": "OpenAIModel"
+                      },
+                      ""
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "AssertDescription": "Activation requires a real ECR digest, existing SecureString ARN and approved model ID."
+        }
+      ]
+    }
+  },
+  "Conditions": {
+    "TaskEnabled": {
+      "Fn::And": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "EnableTaskDefinition"
+            },
+            "true"
+          ]
+        },
+        {
+          "Fn::Not": [
+            {
+              "Fn::Equals": [
+                {
+                  "Ref": "ImageDigest"
+                },
+                ""
+              ]
+            }
+          ]
+        },
+        {
+          "Fn::Not": [
+            {
+              "Fn::Equals": [
+                {
+                  "Ref": "OpenAIKeyParameterArn"
+                },
+                ""
+              ]
+            }
+          ]
+        },
+        {
+          "Fn::Not": [
+            {
+              "Fn::Equals": [
+                {
+                  "Ref": "OpenAIModel"
+                },
+                ""
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "UseCustomerManagedKey": {
+      "Fn::And": [
+        {
+          "Condition": "TaskEnabled"
+        },
+        {
+          "Fn::Not": [
+            {
+              "Fn::Equals": [
+                {
+                  "Ref": "CustomerManagedKmsKeyArn"
+                },
+                ""
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "Resources": {
+    "Repository": {
+      "Type": "AWS::ECR::Repository",
+      "Properties": {
+        "RepositoryName": {
+          "Ref": "ProjectName"
+        },
+        "ImageTagMutability": "IMMUTABLE",
+        "EncryptionConfiguration": {
+          "EncryptionType": "AES256"
+        }
+      }
+    },
+    "Cluster": {
+      "Type": "AWS::ECS::Cluster",
+      "Properties": {
+        "ClusterName": {
+          "Ref": "ProjectName"
+        }
+      }
+    },
+    "LogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/ecs/${ProjectName}/investigation"
+        },
+        "RetentionInDays": 7
+      }
+    },
+    "SecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "IncidentOps standalone CLI: no ingress, outbound HTTPS only.",
+        "VpcId": {
+          "Ref": "VpcId"
+        },
+        "SecurityGroupIngress": [],
+        "SecurityGroupEgress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 443,
+            "ToPort": 443,
+            "CidrIp": "0.0.0.0/0",
+            "Description": "HTTPS to approved AWS services and OpenAI; not a domain allowlist."
+          }
+        ]
+      }
+    },
+    "ExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "ImagePullAndLogs",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecr:GetAuthorizationToken"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecr:BatchCheckLayerAvailability",
+                    "ecr:GetDownloadUrlForLayer",
+                    "ecr:BatchGetImage"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "Repository",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${LogGroup}:log-stream:*"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "Fn::If": [
+              "TaskEnabled",
+              {
+                "PolicyName": "OneSecureString",
+                "PolicyDocument": {
+                  "Version": "2012-10-17",
+                  "Statement": [
+                    {
+                      "Effect": "Allow",
+                      "Action": [
+                        "ssm:GetParameters"
+                      ],
+                      "Resource": {
+                        "Ref": "OpenAIKeyParameterArn"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "Ref": "AWS::NoValue"
+              }
+            ]
+          },
+          {
+            "Fn::If": [
+              "UseCustomerManagedKey",
+              {
+                "PolicyName": "OneCustomerManagedKey",
+                "PolicyDocument": {
+                  "Version": "2012-10-17",
+                  "Statement": [
+                    {
+                      "Effect": "Allow",
+                      "Action": [
+                        "kms:Decrypt"
+                      ],
+                      "Resource": {
+                        "Ref": "CustomerManagedKmsKeyArn"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "Ref": "AWS::NoValue"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "TaskDefinition": {
+      "Type": "AWS::ECS::TaskDefinition",
+      "Condition": "TaskEnabled",
+      "Properties": {
+        "Family": {
+          "Ref": "ProjectName"
+        },
+        "RequiresCompatibilities": [
+          "FARGATE"
+        ],
+        "NetworkMode": "awsvpc",
+        "Cpu": "256",
+        "Memory": "1024",
+        "RuntimePlatform": {
+          "OperatingSystemFamily": "LINUX",
+          "CpuArchitecture": "X86_64"
+        },
+        "ExecutionRoleArn": {
+          "Fn::GetAtt": [
+            "ExecutionRole",
+            "Arn"
+          ]
+        },
+        "ContainerDefinitions": [
+          {
+            "Name": "incidentops-agent",
+            "Essential": true,
+            "Image": {
+              "Fn::Sub": "${Repository.RepositoryUri}@${ImageDigest}"
+            },
+            "User": "1000",
+            "LinuxParameters": {
+              "InitProcessEnabled": true
+            },
+            "StopTimeout": 30,
+            "Command": [
+              "dist/run-investigation.js"
+            ],
+            "Environment": [
+              {
+                "Name": "OPENAI_AGENT_MODEL",
+                "Value": {
+                  "Ref": "OpenAIModel"
+                }
+              }
+            ],
+            "Secrets": [
+              {
+                "Name": "OPENAI_API_KEY",
+                "ValueFrom": {
+                  "Ref": "OpenAIKeyParameterArn"
+                }
+              }
+            ],
+            "LogConfiguration": {
+              "LogDriver": "awslogs",
+              "Options": {
+                "awslogs-group": {
+                  "Ref": "LogGroup"
+                },
+                "awslogs-region": {
+                  "Ref": "AWS::Region"
+                },
+                "awslogs-stream-prefix": "investigation",
+                "mode": "blocking"
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "RepositoryUri": {
+      "Value": {
+        "Fn::GetAtt": [
+          "Repository",
+          "RepositoryUri"
+        ]
+      }
+    },
+    "ClusterArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "Cluster",
+          "Arn"
+        ]
+      }
+    },
+    "SecurityGroupId": {
+      "Value": {
+        "Ref": "SecurityGroup"
+      }
+    },
+    "LogGroupName": {
+      "Value": {
+        "Ref": "LogGroup"
+      }
+    },
+    "ExecutionRoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "ExecutionRole",
+          "Arn"
+        ]
+      }
+    },
+    "TaskDefinitionArn": {
+      "Condition": "TaskEnabled",
+      "Value": {
+        "Ref": "TaskDefinition"
+      }
+    }
+  }
+}
