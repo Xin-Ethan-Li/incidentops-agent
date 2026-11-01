@@ -301,6 +301,31 @@ if (!pwsh) {
     assert.equal(f.calls().filter(x => x.operation === 'run-task').length, 0);
     assert.ok(!JSON.stringify(result).includes('SYNTHETIC_FORBIDDEN_VALUE'));
   });
+  for (const [name, entryPoint, accepted] of [
+    ['missing entryPoint', undefined, true],
+    ['empty entryPoint array', [], true],
+    ['node entryPoint', ['node'], true],
+    ['bash entryPoint', ['bash'], false],
+    ['node entryPoint with inspect flag', ['node', '--inspect'], false],
+    ['empty-string entryPoint', [''], false],
+  ]) test('AWS runner validates actual task definition: ' + name, t => {
+    const f = fixture(t, s => {
+      const container = s.definition.containerDefinitions[0];
+      if (entryPoint === undefined) delete container.entryPoint;
+      else container.entryPoint = entryPoint;
+    });
+    const result = f.run();
+    if (accepted) {
+      assert.equal(result.code, 0); assert.equal(result.data.status, 'SUCCEEDED');
+      assert.equal(result.data.category, 'EXECUTION_VERIFIED_HUMAN_REVIEW_PENDING');
+      assert.equal(f.calls().filter(x => x.operation === 'run-task').length, 1);
+    } else {
+      assert.equal(result.code, 1); assert.equal(result.data.status, 'FAILED');
+      assert.equal(result.data.category, 'TASK_DEFINITION_UNSAFE');
+      assert.equal(result.data.taskArn, null);
+      assert.deepEqual(f.calls().map(x => [x.service, x.operation]), [['ecs', 'describe-task-definition']]);
+    }
+  });
   test('AWS duplicate attempt uses the same token and request; fake idempotency creates only one task', t => {
     const f = fixture(t); assert.equal(f.run().code, 0); assert.equal(f.run().code, 0);
     assert.equal(JSON.parse(readFileSync(f.paths.state, 'utf8')).createdTasks, 1);

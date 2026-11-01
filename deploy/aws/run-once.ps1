@@ -234,7 +234,17 @@ try {
       Require ($container['name'] -ceq 'incidentops-agent' -and $container['user'] -ceq '1000' -and
         (IsMap $container['linuxParameters']) -and $container['linuxParameters']['initProcessEnabled'] -eq $true -and
         $container['stopTimeout'] -eq 30 -and $container['image'] -cmatch '@sha256:[a-f0-9]{64}$') 'TASK_DEFINITION_UNSAFE'
-      if ($container.Contains('entryPoint')) { Require (($container['entryPoint'] -join ',') -ceq 'node') 'TASK_DEFINITION_UNSAFE' }
+      if ($container.Contains('entryPoint')) {
+        $entryPoint = @($container['entryPoint'])
+
+        Require (
+            $entryPoint.Count -eq 0 -or
+            (
+                $entryPoint.Count -eq 1 -and
+                $entryPoint[0] -ceq 'node'
+            )
+        ) 'TASK_DEFINITION_UNSAFE'
+      }
       $keySecret = @($container['secrets'] | Where-Object { $_['name'] -ceq 'OPENAI_API_KEY' })
       Require ($keySecret.Count -eq 1 -and $keySecret[0]['valueFrom'].StartsWith("arn:${partition}:ssm:${Region}:${account}:parameter/")) 'TASK_DEFINITION_UNSAFE'
       $modelPresent = $false
