@@ -1,10 +1,14 @@
 # AWS standalone investigation deployment
 
-Status: offline configuration only. No resources have been deployed or paid AWS investigations verified by these files. Resource creation, image uploads, AWS verification tasks and a single live OpenAI investigation each require separate explicit authorization. `-Execute` is an operator opt-in, not a substitute for that authorization.
+The deployment configuration was first verified offline. A later authorized standalone ECS Fargate task completed one real-provider investigation of synthetic INC-001. All four MCP read-tool executions succeeded, the structured Diagnosis passed validation and the task exited successfully. The project controller reviewed the supplied investigation report and recorded PASS. The machine-generated `humanDiagnosisQuality` remains `PENDING`. No separate structured user adjudication was recorded for this cloud run.
+
+The provisioned resources were subsequently cleaned up. Final AWS billing reconciliation remains **PENDING**. See the [evaluation report](../../docs/evaluation.md#single-real-provider-aws-investigation) for the evidence boundaries.
+
+Resource creation, image uploads, AWS verification tasks and a single live OpenAI investigation each require separate explicit authorization. `-Execute` is an operator opt-in, not a substitute for that authorization.
 
 ## Architecture and boundaries
 
-Use one private ECR image and one ECS Fargate standalone task. The accepted image contains the Service and CLI modes. This task runs the existing CLI and its local MCP stdio subprocess; it does not turn `/health` into an investigation API. There is no ECS Service, ALB, Lambda, database, additional MCP server, NAT gateway, VPC endpoint or CI/CD configuration.
+Use one private ECR image and one ECS Fargate standalone task. The accepted image contains the Service and CLI modes. This task runs the existing CLI and its local MCP stdio subprocess; it does not turn `/health` into an investigation API. The AWS configuration includes no ECS Service, ALB, Lambda, database, additional MCP server, NAT gateway or VPC endpoint. The separate GitHub Actions workflow builds and tests the project without deploying it. See the [architecture overview](../../docs/architecture.md#runtime-and-aws-deployment).
 
 The image retains `ENTRYPOINT ["node"]`. The task definition defaults to `dist/run-investigation.js` without `--live`, so accidentally starting it without an override fails local argument validation (exit 2) instead of starting an investigation or idling a health server. The runner supplies `dist/run-investigation.js --live --incident <requested-ID>` as an argument array. Never prepend `node` or enable `--inspect` in this deployment.
 
@@ -32,7 +36,11 @@ Tests use a fail-closed, temporary fake AWS CLI, synthetic ARNs and synthetic re
 
 JSON parsing and these assertions do **not** establish CloudFormation deployment validity, account permissions, live secret type, available subnets, image availability or runtime capacity. Do not run `aws cloudformation validate-template` as an offline check: it contacts AWS.
 
-Local `npm test` runs 404 tests, including all AWS deployment tests. The application Docker build context excludes exactly `test/aws-deployment.test.js` through a final `.dockerignore` rule after the root-test allow rule; `deploy/aws` remains excluded. The Linux build-test therefore runs the 380 existing application tests without requiring PowerShell or AWS control-plane files. No accepted application test is excluded, and the existing complete Docker acceptance still expects 11/11. AWS deployment tests remain part of local `npm test` and use only the controlled fake CLI; no AWS or real provider access is needed for either offline verification path.
+- **Historical offline AWS integration baseline:** local `npm test` recorded 404/404 PASS before six additional regression tests.
+- **Separate Docker application scope:** Linux build-test recorded 380/380 PASS. The final `.dockerignore` rule after the root-test allow rule excludes exactly `test/aws-deployment.test.js`, and `deploy/aws` remains excluded. This scope requires neither PowerShell nor AWS control-plane files. The separate complete Docker acceptance still expects 11/11.
+- **GitHub-hosted CI:** the first verified complete run recorded 410/410 PASS. The second run succeeded after the Action runtime upgrades. Its exact test count was not independently captured.
+
+AWS deployment tests remain part of local `npm test` and use only the controlled fake CLI; no AWS or real provider access is needed for either offline verification path.
 
 ## AWS prerequisites — later authorization required
 
@@ -57,7 +65,7 @@ aws cloudformation deploy --region $Region --stack-name $Stack --template-file d
 aws cloudformation describe-stacks --region $Region --stack-name $Stack --query 'Stacks[0].Outputs'
 ```
 
-Review the change set/IAM permissions and estimated costs before deployment. Save owned resource IDs privately for cleanup. Cluster creation may require an ECS service-linked role in the account. This has not been checked here.
+Review the change set/IAM permissions and estimated costs before deployment. Save owned resource IDs privately for cleanup. Cluster creation may require an ECS service-linked role in the account. Verify this requirement for the target account.
 
 ## Publish the existing image and verify its ECR digest (AWS operations)
 
@@ -98,7 +106,7 @@ $KmsArn = '' # Only a required customer-managed key ARN, otherwise leave empty.
 aws cloudformation deploy --region $Region --stack-name $Stack --template-file deploy/aws/fargate.json --capabilities CAPABILITY_IAM --parameter-overrides VpcId=$Vpc ProjectName=$Project EnableTaskDefinition=true ImageDigest=$Digest OpenAIKeyParameterArn=$KeyArn OpenAIModel=$Model CustomerManagedKmsKeyArn=$KmsArn
 ```
 
-Conditions gate the task definition and secret policies; a Rules assertion rejects an activation request missing any required input rather than silently accepting placeholders. Registration does not run a task. Candidate resources are 256 CPU units/1024 MiB, LINUX/X86_64, UID 1000, init process and 30-second stop timeout. Capacity is not yet measured under these limits or on AWS. ARM64 is not verified.
+Conditions gate the task definition and secret policies; a Rules assertion rejects an activation request missing any required input rather than silently accepting placeholders. Registration does not run a task. Candidate resources are 256 CPU units/1024 MiB, LINUX/X86_64, UID 1000, init process and 30-second stop timeout. The single completed AWS run does not establish workload capacity under these limits. ARM64 is not verified.
 
 ## Dry-run example — safe, no network
 
@@ -150,6 +158,6 @@ Budget Fargate compute/image-pull time (Linux minimum one minute), public IPv4, 
 
 After separate cleanup authorization: confirm the recorded task has stopped, privately preserve required evidence, delete only the owned repository's images, and delete the owned CloudFormation stack. The nonempty repository must be handled explicitly; do not force-delete unrelated repositories. The log group has DeletionPolicy Delete, so export needed evidence before deleting the stack. The separately created secret is not owned by this stack: delete/revoke it only if dedicated and explicitly authorized. Never delete shared VPC/subnet/IGW resources. Inspect for residual task/network resources and ongoing charges.
 
-Rollback selects a previous verified ECR digest/task revision; it does not automatically run another paid investigation. No ECS Service exists to roll back or continually restart a failed one-shot command. AWS deployment validity, IAM permissions, runtime capacity, live networking, secret injection and live provider execution remain unverified until separately authorized cloud gates pass. GitHub Actions belongs to Step 4.
+Rollback selects a previous verified ECR digest/task revision; it does not automatically run another paid investigation. No ECS Service exists to roll back or continually restart a failed one-shot command. The historical verification applies to the completed run. For any future deployment, separately authorize and verify deployment validity, IAM permissions, runtime capacity, live networking, secret injection and live provider execution for the target configuration.
 
 References: [CloudFormation task definition](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-ecs-taskdefinition.html), [SSM injection](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/secrets-envvar-ssm-paramstore.html), [RunTask](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RunTask.html), [GetLogEvents pagination](https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_GetLogEvents.html).
