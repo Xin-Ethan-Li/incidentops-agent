@@ -1,6 +1,20 @@
 # IncidentOps Agent
 
-A TypeScript agent that investigates synthetic service incidents using LLM tool calling, the Model Context Protocol (MCP), and structured diagnosis. The model chooses which evidence to request. The application enforces tool permissions, budgets, timeouts, retries, approval and output validation so that a model proposal cannot bypass execution policy.
+## Overview
+
+IncidentOps Agent investigates synthetic service incidents. For example, if checkout errors rise in a test scenario, it can read logs, check metrics, look up the service and search runbooks before returning a structured diagnosis.
+
+I built it to explore one backend problem: how to let an LLM decide what evidence to gather while the application stays in control of what runs.
+
+## How It Works
+
+The agent runs on Node.js and is written in TypeScript. The live CLI sends a synthetic incident to the OpenAI Responses API. The model proposes tool calls and uses the returned evidence to write a diagnosis.
+
+- **Tool access.** An MCP client talks to a local server over stdio. The live CLI exposes four read tools for logs, metrics, service information and runbooks. Runbook RAG uses semantic search, with keyword matching as a fallback when semantic retrieval is unavailable.
+- **Execution limits.** The application checks requests and sets limits on model turns and tool attempts. It bounds caller wait times and allows one retry for a recognized read timeout if budget remains.
+- **Approval and output.** In a separate workflow, the orchestrator waits for human approval before a simulated restart. The application checks the final diagnosis format and records tool attempts.
+
+See the [architecture diagrams](docs/architecture.md) for the full flow and the MCP trust boundary.
 
 ## Quick Start
 
@@ -12,88 +26,39 @@ npm run build
 node dist/evaluation/run-baseline.js
 ```
 
-Installation uses the committed lockfile and may access the npm registry. The baseline runs locally with scripted model responses, deterministic embeddings and synthetic fixtures. It needs no AWS account, OpenAI key or paid API calls. Expect a JSON report with five completed workflows, 20/20 required tool observations covered and diagnosis correctness marked `NOT_EVALUATED`. Review raw evaluation output before sharing it. Some runners include evaluator-only expected causes or Ground Truth.
-
-## Engineering Features
-
-- **Investigation tools.** A single agent uses an OpenAI Responses adapter. The official MCP Client and Server communicate over local stdio. Four read tools provide synthetic logs, metrics, service metadata and runbook results. Runbook search ranks semantic matches and falls back to lexical matching only on explicit semantic retrieval unavailability.
-- **Execution controls.** The application enforces model-turn and tool-attempt budgets, caller timeouts and at most one retry for recognized timeout failures on approved reads, subject to remaining budget. A separate approval-capable workflow can pause for trusted human approval before a simulated `restart_service`.
-- **Outcome and observability.** Runtime diagnosis validation checks the structured result. Investigation records track workflow state and tool attempts. Evaluation runners exercise the same orchestration with scripted inputs, and optional instrumentation captures caller waits, observed model usage and in-memory OpenTelemetry spans.
-- **Delivery.** A shared Docker image packages the HTTP and CLI entry points. Operator-controlled AWS configuration supports a standalone ECS Fargate task. GitHub Actions checks compilation and offline behavior.
-
-## Architecture
-
-**The model proposes and interprets. The application authorizes, executes, validates and terminates.**
-
-The investigation CLI selects a synthetic incident and creates a session. `AgentOrchestrator` asks the model adapter for tool proposals or a final diagnosis. After policy checks, `ToolExecutor` validates and routes requests through the MCP client to the server's read handlers. Tool results return to the next model turn with their original call IDs. The application validates the diagnosis and records the outcome, execution attempts and available observations. See the [investigation and deployment diagrams](docs/architecture.md).
-
-## Application Entry Points
-
-### HTTP health check
-
-After building, run `npm start`. The NestJS/Fastify service exposes `GET /health` on port 3000 by default.
-
-```bash
-curl http://localhost:3000/health
-```
-
-The response is `{"status":"ok"}`. Investigations use the separate CLI below.
-
-### Optional live investigation
-
-After building, configure `OPENAI_API_KEY` and `OPENAI_AGENT_MODEL` in the process environment. The following command explicitly opts in to real provider requests. Model and embedding calls may incur charges.
-
-```bash
-npm run investigate -- --live --incident INC-001
-```
-
-The CLI runs one investigation and emits a JSON report. Its model sees only the four read tools. The simulated restart path is exercised separately.
+Installing packages may need internet access. The demo uses local test data and scripted model responses. It needs no AWS account or OpenAI API key. Expect a JSON report with **5/5** workflows completed and **20/20** required tool observations covered. Share the summary only, since raw output can include evaluator-only expected causes.
 
 ## Testing and Evaluation
 
-Use PowerShell 7 or later on PATH for the complete suite, including the fake AWS CLI tests. After building, run the same serial test command used in [GitHub Actions](.github/workflows/ci.yml).
+The first [GitHub Actions](.github/workflows/ci.yml) run passed **410/410 offline regression tests**. The second run also succeeded. To run the full suite after building, put PowerShell 7 on PATH and run:
 
 ```bash
 node --test --test-concurrency=1 test/*.test.js
 ```
 
-- **Historical CI.** The first GitHub-hosted run passed 410 of 410 tests, with zero failures, skips or cancellations. The second run succeeded after the Action runtime upgrades. Its exact test count was not independently captured.
-- **Scripted evaluation.** The baseline completed 5/5 workflows and covered 20/20 required tool observations. The expanded run completed 30/30 workflows and covered 85/85 required observations.
-- **Historical human assessment.** Reviews of 30 saved scripted outcomes recorded Tool Correctness at 30/30 PASS and Task Success at 0/30 PASS. Task Success requires completion plus passing judgments for cause, evidence and actions.
+- **Scripted workflows:** 30/30 completed in the expanded run, with 85/85 required tool observations covered.
+- **Historical human review:** Tool Correctness was **30/30 PASS** and Task Success was **0/30 PASS** across 30 saved scripted outcomes.
 
-These are separate measures of software behavior, workflow completion, tool coverage and reviewed quality. The [evaluation report](docs/evaluation.md) explains the denominators, reproduction commands and evidence limits.
+The script requests evidence but does not infer the incident cause. A workflow can finish even when its diagnosis fails review. Real-model diagnosis accuracy remains unmeasured. See the [evaluation report](docs/evaluation.md) for the rubric, evidence and reproduction steps.
 
 ## Docker and AWS
 
-The [Dockerfile](Dockerfile) builds a shared non-root image. Its default command starts the health service. A command override runs the investigation CLI. The AWS configuration supports publishing the image to ECR, running one digest-pinned ECS Fargate task, injecting a provider key from SSM SecureString through the execution role, and collecting stdout through CloudWatch Logs. The operator controls provisioning, task execution and cleanup. See the [AWS operator guide](deploy/aws/README.md).
+The [Docker image](Dockerfile) packages both entry points and runs as a non-root user.
 
-One real-provider investigation of synthetic INC-001 completed on Fargate. Four MCP read-tool executions succeeded, the structured diagnosis passed validation and the task terminated successfully. The project controller reviewed the diagnosis and recorded PASS based on the supplied report. The machine-generated review field remains `PENDING`. No separate structured user adjudication was recorded for this cloud run. Deployment resources were subsequently cleaned up. Final AWS billing reconciliation remains pending.
+For a local run, build the project and then use one of these npm commands:
 
-## Project Structure
+- **Health service:** `npm start` starts the NestJS/Fastify app. `GET /health` returns `{"status":"ok"}` on port 3000 by default.
+- **Investigation CLI:** `npm run investigate -- --live --incident INC-001` opts in to real provider calls. Set `OPENAI_API_KEY` and `OPENAI_AGENT_MODEL` first. Model and embedding calls can incur charges.
 
-```text
-src/agent/        Orchestration, model adapter and execution policy
-src/mcp/          MCP client, stdio entry and server
-src/tools/        Operational tool handlers and simulated restart
-src/rag/          Runbook embeddings, ranking and fallback
-src/domain/       Incident, diagnosis and investigation contracts
-src/evaluation/   Scripted datasets, runners and quality assessment
-src/measurement/  Caller timing and observed model usage
-src/tracing/      In-memory OpenTelemetry spans
-test/            Unit, integration and deployment checks
-docs/            Architecture and evaluation evidence
-deploy/aws/      Fargate template, runner and operator guide
-```
+One real OpenAI investigation of synthetic INC-001 completed successfully as an ECS Fargate task. All four MCP read tools succeeded, and the diagnosis passed schema validation. The AWS resources were removed. The result covers one run only. Final AWS billing reconciliation is pending. See the [evaluation report](docs/evaluation.md#single-real-provider-aws-investigation) for review details.
 
-## Limitations and Safety
+The [AWS operator guide](deploy/aws/README.md) covers deployment and cleanup. CI builds and tests the project. Deployment is an operator task.
 
-- Operational data is synthetic. Scripted results do not measure real LLM diagnosis accuracy. The single Fargate run demonstrates one execution.
-- `AgentOrchestrator` enforces approval for the simulated restart. Direct MCP access has no independent approval gate. The live CLI exposes only the four approved read tools.
-- Investigation and approval state live in memory. Tracing uses in-memory spans. Usage summaries cover observed model responses and exclude embedding usage and billing.
-- Timeouts bound caller waiting. Underlying work can continue. CI builds and tests the project, and deployment remains an operator action.
+## Limits and Documentation
 
-## Documentation
+The project uses synthetic incident data and simulates restarts. Investigation state, approvals and OpenTelemetry spans stay in memory. Timeouts limit how long the caller waits, and work may continue after a timeout. The single AWS run shows that one execution worked.
 
 - [Architecture and execution boundaries](docs/architecture.md)
-- [Evaluation results and reproduction](docs/evaluation.md)
-- [AWS deployment and cleanup guide](deploy/aws/README.md)
+- [Evaluation results and limitations](docs/evaluation.md)
+- [AWS deployment guide](deploy/aws/README.md)
+- [MIT License](LICENSE)
