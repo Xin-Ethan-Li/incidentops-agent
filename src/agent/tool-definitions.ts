@@ -1,3 +1,13 @@
+import { metrics } from '../fixtures/metrics.js';
+import { services } from '../fixtures/services.js';
+
+const metricServices = new Set(metrics.map(series => series.service));
+const queryableMetricServices = services.filter(service => metricServices.has(service.name)).map(service => service.name);
+
+export const READ_ONLY_METRICS_GUIDANCE = `Use a registered service name. Services with metrics: ${queryableMetricServices.join(', ')}. `
+  + 'A dependency listed by get_service_info is not automatically a metric source. '
+  + 'If a dependency has no metrics of its own, use evidence from the service that depends on it.';
+
 const timeWindow = {
   type: 'object', additionalProperties: false,
   properties: { start: { type: 'string', description: 'ISO date-time with timezone, inclusive.' }, end: { type: 'string', description: 'ISO date-time with timezone, inclusive.' } },

@@ -1,7 +1,7 @@
 import OpenAI from 'openai';
 import { assertDiagnosis, DIAGNOSIS_SCHEMA } from '../domain/diagnosis.js';
 import { assertModelResult, INVESTIGATION_INSTRUCTIONS, type AgentModel, type AgentModelRequest, type AgentModelResult, type AgentToolCall } from './agent-model.js';
-import { TOOL_DEFINITIONS } from './tool-definitions.js';
+import { READ_ONLY_METRICS_GUIDANCE, TOOL_DEFINITIONS } from './tool-definitions.js';
 import { associateProviderUsage, providerUsage } from '../measurement/provider-usage.js';
 
 export interface OpenAIAgentModelOptions {
@@ -43,7 +43,11 @@ export class OpenAIAgentModel implements AgentModel {
       model: this.model,
       instructions: INVESTIGATION_INSTRUCTIONS, // previous_response_id does not carry instructions forward.
       tools: TOOL_DEFINITIONS.filter(definition => !this.options.readOnly || definition.name !== 'restart_service')
-        .map(definition => ({ type: 'function' as const, ...definition, strict: true })),
+        .map(definition => ({
+          type: 'function' as const, ...definition, strict: true,
+          description: this.options.readOnly && definition.name === 'get_metrics'
+            ? `${definition.description} ${READ_ONLY_METRICS_GUIDANCE}` : definition.description,
+        })),
       parallel_tool_calls: false,
       ...(this.options.maxOutputTokens === undefined ? {} : { max_output_tokens: this.options.maxOutputTokens }),
       text: { format: { type: 'json_schema', name: 'incident_diagnosis', schema: DIAGNOSIS_SCHEMA, strict: true } },

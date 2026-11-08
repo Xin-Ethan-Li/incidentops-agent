@@ -7,10 +7,12 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SdkError, SdkErrorCode } from '@modelcontextprotocol/client';
 import { LIVE_LIMITS, runLiveInvestigation } from '../../dist/live-investigation.js';
+import { TOOL_DEFINITIONS } from '../../dist/agent/tool-definitions.js';
 import { OperationTimeoutError } from '../../dist/agent/with-timeout.js';
 import { IncidentOpsMcpClient } from '../../dist/mcp/client.js';
-import { incidents } from '../../dist/fixtures/index.js';
+import { incidents, metrics, services } from '../../dist/fixtures/index.js';
 import { groundTruth } from '../../dist/fixtures/ground-truth.js';
+import { ToolError } from '../../dist/tools/tool-error.js';
 import { estimateCaseMicrousd, parsePilotEvidence, PILOT_CASES, PILOT_VERSION } from '../../dist/evaluation/live-pilot-contracts.js';
 import { pilotRunPath, runLivePilot } from '../../dist/evaluation/live-pilot.js';
 import { assessPilot, pilotReviewReferences, readPilotJournal, resolvePilotReviewReference } from '../../dist/evaluation/live-pilot-review.js';
@@ -232,6 +234,18 @@ test('mocked live session uses four read schemas, preserves evidence delivery an
   assert.equal(bodies.length, 2);
   assert.deepEqual(JSON.parse(bodies[0].input), incident);
   assert.deepEqual(bodies[0].tools.map(tool => tool.name), ['search_logs', 'get_metrics', 'get_service_info', 'search_runbook']);
+  const metricTool = bodies[0].tools.find(tool => tool.name === 'get_metrics');
+  const originalMetricTool = TOOL_DEFINITIONS.find(tool => tool.name === 'get_metrics');
+  const metricServices = services.filter(({ name }) => metrics.some(series => series.service === name)).map(({ name }) => name);
+  assert.ok(!metricServices.includes('redis-cache'));
+  assert.ok(!metricTool.description.includes('redis-cache'));
+  assert.equal(metricTool.description, `${originalMetricTool.description} Use a registered service name. Services with metrics: ${metricServices.join(', ')}. `
+    + 'A dependency listed by get_service_info is not automatically a metric source. '
+    + 'If a dependency has no metrics of its own, use evidence from the service that depends on it.');
+  const expectedTools = TOOL_DEFINITIONS.filter(tool => tool.name !== 'restart_service')
+    .map(tool => ({ ...tool, type: 'function', strict: true }));
+  assert.deepEqual(bodies[0].tools.map(tool => tool.name === 'get_metrics' ? { ...tool, description: originalMetricTool.description } : tool), expectedTools);
+  assert.deepEqual(bodies[1].tools, bodies[0].tools);
   assert.equal(bodies[0].max_output_tokens, 2048);
   assert.equal(bodies[1].previous_response_id, 'response-0');
   const wire = JSON.stringify(bodies);
@@ -302,6 +316,36 @@ test('partial batch success is recorded without marking outputs as delivered whe
   assert.ok(evidence.attempts[0].output);
   assert.equal(evidence.attempts[1].output, null);
   assert.deepEqual(evidence.deliveredOutputs, []);
+});
+
+test('an unregistered metric dependency still fails on the fourth attempt without a retry or more evidence', async t => {
+  const args = { service: incident.service, timeWindow: incident.timeWindow, metricNames: null };
+  const { bodies } = fakeResponses(t, [
+    [functionCall('search_logs', { service: incident.service, timeWindow: incident.timeWindow }, 'logs')],
+    [functionCall('get_metrics', args, 'checkout-metrics')],
+    [read('service')],
+    [functionCall('get_metrics', { ...args, service: 'redis-cache' }, 'redis-metrics')],
+  ]);
+  let failure;
+  const result = await runLivePilot(liveInput('unregistered-metrics'), undefined, dependencies(async (id, options) => {
+    try { return await fixtureSession(id, options); }
+    catch (error) { failure = error; throw error; }
+  }));
+  assert.ok(failure instanceof ToolError);
+  assert.equal(failure.code, 'SERVICE_NOT_FOUND');
+  assert.equal(failure.message, 'Unknown service: redis-cache');
+  assert.equal(result.stop, 'EXECUTION_ERROR');
+  assert.deepEqual(result.notRun, PILOT_CASES.slice(1));
+  const evidence = parsePilotEvidence(saved('unregistered-metrics', 'INC-001.json'));
+  assert.equal(evidence.status, 'FAILED');
+  assert.equal(bodies.length, 4);
+  assert.deepEqual(evidence.attempts.map(item => [item.callId, item.status]), [
+    ['logs', 'SUCCEEDED'], ['checkout-metrics', 'SUCCEEDED'], ['service', 'SUCCEEDED'], ['redis-metrics', 'FAILED'],
+  ]);
+  assert.equal(evidence.attempts[3].output, null);
+  assert.deepEqual(evidence.deliveredOutputs.map(item => item.callId), ['logs', 'checkout-metrics', 'service']);
+  const series = JSON.parse(evidence.deliveredOutputs[1].output);
+  assert.ok(series.length && series.every(item => item.service === incident.service && item.points.length));
 });
 
 test('failed continuation does not certify that an attempted payload reached the model', async t => {
