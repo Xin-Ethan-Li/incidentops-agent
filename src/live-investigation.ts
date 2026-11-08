@@ -43,7 +43,14 @@ export interface LiveOptions {
   /** Explicit local inspection only; default output omits raw arguments and tool outputs. */
   inspect?: boolean;
   onReport?(report: LiveInvestigationReport): void;
+  /** Synchronous, passive observations for a caller-owned local evaluation. */
+  onObservation?(event: LiveObservation): undefined;
 }
+
+export type LiveObservation =
+  | { kind: 'model-return'; sequence: number; requests: AgentToolCall[]; continuationOutputs: AgentToolOutput[] }
+  | { kind: 'tool-start'; sequence: number; call: AgentToolCall }
+  | { kind: 'tool-return'; sequence: number; output: AgentToolOutput };
 
 export interface LiveInvestigationReport {
   execution: 'OPENAI_ADAPTER';
@@ -93,8 +100,12 @@ export async function runLiveInvestigation(incidentId: string, options: LiveOpti
   let failure: LiveInvestigationReport['failure'];
   const cleanup: LiveInvestigationReport['cleanup'] = { mcpClose: 'NOT_CREATED', childExit: 'NOT_OBSERVED',
     tracingShutdown: 'NOT_CREATED', errors: [] };
-  const requestedTools: { callId: string; toolName: string }[] = [], deliveredCallIds: string[] = [];
-  const requests: AgentToolCall[] = [], deliveredOutputs: AgentToolOutput[] = [];
+  const requestedTools: { callId: string; toolName: string }[] = [];
+  const requests: AgentToolCall[] = [];
+  const returnedContinuations: { sequence: number; callIds: string[]; outputs: AgentToolOutput[] }[] = [];
+  const observe = (event: LiveObservation) => observeSafely(() => options.onObservation?.(structuredClone(event)));
+  let modelSequence = 0;
+  let toolSequence = 0;
   let spans: LiveInvestigationReport['spans'] = [];
   const closeMcp = () => {
     if (!client) return Promise.resolve();
@@ -118,18 +129,34 @@ export async function runLiveInvestigation(incidentId: string, options: LiveOpti
     await connecting;
     pid ??= client.pid;
     const observedModel: AgentModel = { async respond(request) {
-      if (request.kind === 'continuation') {
-        deliveredCallIds.push(...request.outputs.map(output => output.callId));
-        if (options.inspect) deliveredOutputs.push(...structuredClone(request.outputs));
-      }
+      const sequence = ++modelSequence;
+      const continuation = request.kind === 'continuation' ? {
+        sequence, callIds: request.outputs.map(output => output.callId),
+        outputs: options.inspect ? structuredClone(request.outputs) : [],
+      } : undefined;
       const result = await model.respond(request);
+      if (continuation) returnedContinuations.push(continuation);
       if (result?.kind === 'tool_calls' && Array.isArray(result.calls)) {
         requestedTools.push(...result.calls.map(call => ({ callId: call.callId, toolName: call.name })));
         if (options.inspect) requests.push(...structuredClone(result.calls));
       }
+      if (options.onObservation) observe({ kind: 'model-return', sequence,
+        requests: result?.kind === 'tool_calls' && Array.isArray(result.calls) ? result.calls : [],
+        continuationOutputs: request.kind === 'continuation' ? request.outputs : [] });
       return result; // Keep the original object and its WeakMap usage metadata.
     } };
-    agent = new AgentOrchestrator(observedModel, new ToolExecutor(client), LIVE_LIMITS.maxTurns, LIVE_LIMITS.maxToolCalls,
+    const executor = new ToolExecutor(client);
+    if (options.onObservation) {
+      const execute = executor.execute.bind(executor);
+      executor.execute = async call => {
+        const sequence = ++toolSequence;
+        observe({ kind: 'tool-start', sequence, call });
+        const output = await execute(call);
+        observe({ kind: 'tool-return', sequence, output });
+        return output;
+      };
+    }
+    agent = new AgentOrchestrator(observedModel, executor, LIVE_LIMITS.maxTurns, LIVE_LIMITS.maxToolCalls,
       LIVE_LIMITS.modelTimeoutMs, LIVE_LIMITS.toolTimeoutMs, collector, local.tracing);
     record = await agent.investigate(incident);
   } catch (error) {
@@ -156,13 +183,18 @@ export async function runLiveInvestigation(incidentId: string, options: LiveOpti
   const terminal = record !== undefined && ['COMPLETED', 'FAILED', 'REJECTED'].includes(record.status);
   const traceComplete = terminal && spans.filter(span => span.name === 'incident.investigation').length === 1;
   const executions = record?.toolExecutions ?? [];
+  const measurements = collector.getAll();
+  // A returned request can still have lost the caller's timeout race during cleanup.
+  const completedContinuations = returnedContinuations.filter(item => measurements[0]?.modelCalls[item.sequence - 1]?.status === 'SUCCEEDED');
+  const deliveredCallIds = completedContinuations.flatMap(item => item.callIds);
+  const deliveredOutputs = completedContinuations.flatMap(item => item.outputs);
   const evidenceDelivered = executions.some(call => call.status === 'SUCCEEDED' && reads.has(call.toolName)
     && requestedTools.some(request => request.callId === call.callId && request.toolName === call.toolName)
     && deliveredCallIds.includes(call.callId));
   const report: LiveInvestigationReport = { execution: 'OPENAI_ADAPTER', incidentId,
     outcome: { status: record?.status ?? 'NOT_STARTED', ...(record ? { investigationId: record.investigationId } : {}),
       ...(record?.diagnosis ? { diagnosis: record.diagnosis } : {}), toolExecutions: executions },
-    measurements: collector.getAll(), measurementSummary: summarizeMeasurements(collector.getAll()), spans, traceComplete,
+    measurements, measurementSummary: summarizeMeasurements(measurements), spans, traceComplete,
     verificationReady: !failed && record?.status === 'COMPLETED' && evidenceDelivered && traceComplete
       && cleanup.errors.length === 0 && cleanup.childExit === 'OBSERVED', humanDiagnosisReview: 'PENDING',
     observed: { requestedTools, deliveredCallIds }, ...(options.inspect ? {

@@ -41,6 +41,9 @@ jobs:
       - name: Run offline tests
         run: node --test --test-concurrency=1 test/*.test.js
 
+      - name: Run offline pilot tests
+        run: node --test --test-concurrency=1 test/live-pilot/*.test.js
+
       - name: Verify tracked working tree
         run: |
           git diff --check

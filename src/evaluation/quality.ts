@@ -113,7 +113,7 @@ export function reviewReferences(material: QualityMaterial): string[] {
     ...material.observed.deliveredOutputs.map(output => 'observed-output:' + output.callId)];
 }
 
-export function checkToolRequests(material: QualityMaterial) {
+export function checkToolRequests(material: Pick<QualityMaterial, 'observed' | 'scenario'>) {
   const { requests, attempts } = material.observed, incident = material.scenario.evaluationCase.incident;
   const issues: { code: string; callId?: string; reason: string }[] = [];
   const issue = (code: string, reason: string, callId?: string) => issues.push({ code, ...(callId ? { callId } : {}), reason });
