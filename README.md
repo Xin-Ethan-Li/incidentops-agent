@@ -30,16 +30,17 @@ Installing packages may need internet access. The demo uses local test data and 
 
 ## Testing and Evaluation
 
-The first [GitHub Actions](.github/workflows/ci.yml) run passed **410/410 offline regression tests**. The second run also succeeded. To run the full suite after building, put PowerShell 7 on PATH and run:
+[GitHub Actions CI #10](https://github.com/Xin-Ethan-Li/incidentops-agent/actions/runs/42528233488) passed **410/410 root offline tests** and **20/20 pilot offline tests**. To run both suites after building, put PowerShell 7 on PATH and use the commands below.
 
 ```bash
 node --test --test-concurrency=1 test/*.test.js
+node --test --test-concurrency=1 test/live-pilot/*.test.js
 ```
 
-- **Scripted workflows:** 30/30 completed in the expanded run, with 85/85 required tool observations covered.
-- **Historical human review:** Tool Correctness was **30/30 PASS** and Task Success was **0/30 PASS** across 30 saved scripted outcomes.
+- **Historical scripted evaluation.** The expanded run completed **30/30 workflows** and covered **85/85 required tool observations**. The recorded human review marked Tool Correctness **30/30 PASS** and Task Success **0/30 PASS**.
+- **Real-model pilot.** The agent completed **5/5** synthetic investigations using a live OpenAI model. The recorded human review marked Task Success **5/5 PASS** and Tool Correctness **4/5 PASS**. One investigation missed a required runbook lookup.
 
-The script requests evidence but does not infer the incident cause. A workflow can finish even when its diagnosis fails review. Real-model diagnosis accuracy remains unmeasured. See the [evaluation report](docs/evaluation.md) for the rubric, evidence and reproduction steps.
+The five live cases are a small, fixed synthetic evaluation. Their results apply to those cases. See the [evaluation report](docs/evaluation.md) for the rubric and reproduction steps.
 
 ## Docker and AWS
 

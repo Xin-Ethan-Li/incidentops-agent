@@ -2,11 +2,11 @@
 
 ## Evaluation Overview
 
-The evidence covers software behavior, scripted workflow execution, human assessment of saved scripted outputs, and one real-provider cloud investigation. These answer different questions. A workflow can complete with valid output structure and appropriate tool requests while producing a poor diagnosis. The saved quality assessment demonstrates that distinction directly.
+This report separates offline software tests, scripted evaluations, a five-case real-model pilot and one historical AWS investigation. The scripted and real-model runs have separate human review results. Workflow completion, diagnosis quality and tool selection are measured separately.
 
 ## Evaluation Scope and Environment
 
-The incident inputs and operational evidence are synthetic. The reproducible runners use the existing Agent and tool execution path with scripted model responses, local MCP transport and deterministic embeddings. The historical GitHub Actions environment used Ubuntu 24.04, Node.js 22 and PowerShell 7 or later. The repository requires Node.js 22.14.0 or later. Use Node.js 22 to match CI.
+The incident inputs and operational evidence are synthetic. The scripted runners use the existing Agent and tool execution path with scripted model responses, local MCP transport and deterministic embeddings. GitHub Actions uses Ubuntu 24.04, Node.js 22 and PowerShell 7 or later. The repository requires Node.js 22.14.0 or later. Use Node.js 22 to match CI.
 
 See the [architecture](architecture.md), [package configuration](../package.json) and [CI workflow](../.github/workflows/ci.yml).
 
@@ -22,7 +22,9 @@ See the [architecture](architecture.md), [package configuration](../package.json
 | Docker | Separate container build, health, mocked investigation and cleanup checks | [Docker acceptance](../test/docker/container.test.js), [Dockerfile](../Dockerfile) |
 | AWS deployment | Template and runner behavior using a local fake CLI | [AWS deployment tests](../test/aws-deployment.test.js) |
 
-The first GitHub-hosted CI run recorded **410 tests, 410 passed, 0 failed, 0 skipped and 0 cancelled**. The second run succeeded after the Action runtime upgrades at commit `6d40125`. Its exact count was not independently captured. These are historical results. The public workflow reproduces the build and root-level serial test command, including the fake AWS tests. Docker acceptance is separate. Model-facing tests use scripted responses or provider mocks.
+The first GitHub-hosted CI run recorded **410 tests, 410 passed, 0 failed, 0 skipped and 0 cancelled**. The second run succeeded after the Action runtime upgrades at commit `6d40125`. Its exact count was not independently captured.
+
+[CI #10](https://github.com/Xin-Ethan-Li/incidentops-agent/actions/runs/42528233488) built the project and passed **410/410 root offline tests** and **20/20 pilot offline tests**. Both suites reported zero failures, skips and cancellations. The root suite includes fake AWS tests. Model-facing tests use scripted responses or provider mocks. Docker acceptance runs separately.
 
 ## Scripted Incident Evaluation
 
@@ -54,6 +56,37 @@ The assessor counts PASS and FAIL in the evaluated denominator and tracks NOT_EV
 
 Sources include the [rubric](../src/evaluation/quality-contracts.ts), [assessor](../src/evaluation/quality.ts) and [review tests](../test/quality.test.js).
 
+## Five-Case Real-Model Pilot
+
+### Setup and execution
+
+The local pilot ran synthetic incidents INC-001 through INC-005 in a fixed serial order. It used `gpt-6.1-sol` through the OpenAI Responses API and `text-embedding-3-small` for runbook retrieval. The model could use four read-only MCP tools for service metadata, logs, metrics and runbook search. Each case allowed up to five model turns and four tool attempts.
+
+Run `pilot-20261108-02` used commit `8bb1d4b80bcae02a09fdff64834acbf4aede8274`. Workflow Completion was **5/5 PASS**, with five structured diagnoses, 24 successful model calls and 19 successful tool attempts. All 19 tool outputs were delivered to the model. The local pilot had no retries or AWS operations. Frozen case evidence and observation records are kept privately.
+
+The earlier pilot, `pilot-20261108-01`, stopped during INC-001 after an unsupported `get_metrics` request for `redis-cache`. The later commit clarified which services have queryable metrics in the model-facing tool description. These results describe what happened in each run.
+
+### Human review results
+
+| Criterion | PASS | FAIL |
+| --- | ---: | ---: |
+| Task Success | 5/5 | 0/5 |
+| Tool Correctness | 4/5 | 1/5 |
+| Cause | 5/5 | 0/5 |
+| Evidence | 5/5 | 0/5 |
+| Actions | 5/5 | 0/5 |
+| Tool Selection | 4/5 | 1/5 |
+
+Task Success requires a completed workflow and PASS judgments for Cause, Evidence and Actions. Tool Correctness requires passing structural checks and a PASS judgment for Tool Selection.
+
+For INC-005, the reviewer found the notification diagnosis supported by the evidence. The model omitted `search_runbook`, which the rubric required for that case. INC-005 therefore recorded **Task Success PASS** and **Tool Correctness FAIL**.
+
+### Cost and reproduction
+
+The Responses API reported 24,701 input tokens and 2,444 output tokens. Applying Standard uncached input and output rates gives an observed Responses usage estimate of **USD 0.073842**. The local runner reserved **USD 8.519375** against a USD 10 soft budget using conservative input pricing and token allowances. Embedding usage was unmeasured. Embedding charges and cache pricing can affect the final provider bill.
+
+The public repository provides the [pilot runner](../src/evaluation/run-live-pilot.ts), [review validation](../src/evaluation/live-pilot-review.ts), [synthetic fixtures](../src/fixtures) and [offline pilot tests](../test/live-pilot/live-pilot.test.js). Exact replay of the historical results requires private execution records and human review JSON. Review provenance is recorded as `INDEPENDENT_HUMAN`. The software validates the record and evidence references. It does not authenticate reviewer identity.
+
 ## Measurement and Tracing
 
 The measured runner collects investigation elapsed time and model/tool caller waits. Investigation elapsed includes retry backoff and approval suspension. MCP setup and cleanup sit outside that boundary. Durations depend on the local environment. A timeout records the caller's wait and underlying work can continue.
@@ -72,13 +105,14 @@ See the [live session](../src/live-investigation.ts), [AWS template](../deploy/a
 
 ## Reproduction Instructions
 
-Run from the repository root with Node.js 22 and npm. Use PowerShell 7 or later on PATH for the complete test suite, including the fake AWS CLI checks. The serial test command below matches the CI test step. The runner commands assume the build has completed.
+Run from the repository root with Node.js 22 and npm. Use PowerShell 7 or later on PATH for the complete test suite, including the fake AWS CLI checks. Both serial test commands match CI. The runner commands assume the build has completed.
 
 | Command | Prerequisites and access | Expected output and what it verifies | Evidence boundary |
 | --- | --- | --- | --- |
 | `npm ci --include=dev --include=optional --no-audit --no-fund` | Node, npm and registry access for uncached packages | Installs locked dependencies including platform-specific optional compiler packages | Installation alone establishes dependency availability |
 | `npm run build` | Installed dependencies. Local execution | TypeScript compilation and runnable JavaScript under `dist/` | Build success establishes compilation |
 | `node --test --test-concurrency=1 test/*.test.js` | Built project and PowerShell 7. Local execution | Test runner results and summary for root test files, including fake AWS checks | A fresh test run is separate from historical CI and Docker acceptance |
+| `node --test --test-concurrency=1 test/live-pilot/*.test.js` | Built project and Git. Local execution | Pilot tests with mocked provider responses and local MCP | Covers the pilot software without reproducing a historical live run or human review |
 | `node dist/evaluation/run-baseline.js` | Built project. Local execution | Five-case JSON report with completion and required-tool coverage | Scripted workflow and coverage only |
 | `node dist/evaluation/run-expanded.js` | Built project. Local execution | Thirty-case JSON report with coverage across isolated fixture snapshots | Scripted workflow and coverage only |
 | `node dist/evaluation/run-measured.js` | Built project. Local execution | JSON scoring, timing and usage availability summary with an example investigation | Local waits rather than a provider performance or cost benchmark |
@@ -90,7 +124,7 @@ These commands require no real AWS or OpenAI credentials or paid API calls. Depe
 
 - The automated suites measure software behavior. Test pass counts are independent of AI quality scores.
 - Required-tool coverage and Tool Correctness measure different criteria. Both are separate from diagnosis quality.
-- The scripted workflows use fixed tool proposals and synthetic data. The single AWS run adds evidence of real-provider execution on one synthetic input.
+- The scripted workflows use fixed tool proposals. The real-model pilot covers five fixed synthetic cases, so its results apply to those cases. The single AWS run provides separate evidence for one cloud execution.
 - Investigation state and tracing are in memory. Measured waits and observed usage are limited to their documented boundaries.
 
 ## Evidence and Source References
@@ -100,5 +134,6 @@ These commands require no real AWS or OpenAI credentials or paid API calls. Depe
 | Historical CI outcomes | Accepted run results. See the [workflow](../.github/workflows/ci.yml) for commands | Fresh build and offline suite |
 | Scripted completion and coverage | [Baseline](../src/evaluation/run-baseline.ts) and [expanded](../src/evaluation/run-expanded.ts) reports | Public fixtures and runners |
 | Historical quality totals | Accepted saved review replay. See the [assessment interface](../src/evaluation/quality-contracts.ts) | Public assessor and tests. Exact historical judgments depend on private inputs |
+| Five-case real-model pilot | Frozen local execution records and accepted human review replay | Public runner, fixtures and offline tests. Exact historical replay depends on private inputs |
 | Measurement and tracing | [Measured](../src/evaluation/run-measured.ts) and [traced](../src/evaluation/run-traced.ts) demonstrations | Public runners with local, variable timings |
 | Historical AWS result | Accepted execution record and subsequent controller review. See the [operator guide](../deploy/aws/README.md) | Public configuration and fake CLI tests. Historical live result depends on private evidence |
